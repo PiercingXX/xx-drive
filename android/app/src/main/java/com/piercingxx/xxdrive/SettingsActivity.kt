@@ -10,6 +10,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import com.piercingxx.xxdrive.theme.ThemeChrome
 import androidx.work.Constraints
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.NetworkType
@@ -24,6 +25,7 @@ class SettingsActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         Session.init(this)
         setContentView(R.layout.activity_settings)
+        ThemeChrome.apply(this)
 
         val wifiOnly = findViewById<CheckBox>(R.id.wifiOnlyCheck)
         val autoBackup = findViewById<CheckBox>(R.id.autoBackupCheck)
@@ -55,6 +57,11 @@ class SettingsActivity : AppCompatActivity() {
             startActivity(android.content.Intent(this, LoginActivity::class.java))
             finish()
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        ThemeChrome.apply(this)
     }
 
     private fun applyBackupSchedule(wifiOnly: Boolean) {

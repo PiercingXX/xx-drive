@@ -14,6 +14,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import com.piercingxx.xxdrive.theme.ThemeChrome
 
 /**
  * Main screen: hosts the server's PWA in a WebView and bridges the two things
@@ -43,6 +44,7 @@ class MainActivity : AppCompatActivity() {
             return
         }
         setContentView(R.layout.activity_main)
+        ThemeChrome.apply(this)
 
         web = findViewById(R.id.webview)
         web.settings.javaScriptEnabled = true
@@ -86,6 +88,11 @@ class MainActivity : AppCompatActivity() {
         }
 
         web.loadUrl(Session.baseUrl + "/")
+    }
+
+    override fun onResume() {
+        super.onResume()
+        ThemeChrome.apply(this)
     }
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {

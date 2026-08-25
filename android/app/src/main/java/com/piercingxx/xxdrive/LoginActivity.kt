@@ -6,6 +6,7 @@ import android.widget.EditText
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import com.piercingxx.xxdrive.theme.ThemeChrome
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -33,6 +34,7 @@ class LoginActivity : AppCompatActivity() {
             return
         }
         setContentView(R.layout.activity_login)
+        ThemeChrome.apply(this)
 
         val url = findViewById<EditText>(R.id.urlInput)
         val user = findViewById<EditText>(R.id.userInput)
@@ -63,6 +65,12 @@ class LoginActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+
+    override fun onResume() {
+        super.onResume()
+        ThemeChrome.apply(this)
     }
 
     @Throws(Exception::class)

@@ -27,6 +27,11 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+    testOptions {
+        // Android SDK stubs return defaults instead of throwing in JVM unit
+        // tests, so pure-logic tests can touch classes that reference android.*.
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 dependencies {
@@ -37,4 +42,6 @@ dependencies {
     implementation("com.google.android.material:material:1.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+
+    testImplementation("junit:junit:4.13.2")
 }

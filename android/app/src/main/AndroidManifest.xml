@@ -24,5 +24,16 @@
 
         <activity android:name=".MainActivity" android:exported="false" />
         <activity android:name=".SettingsActivity" android:exported="false" />
+
+        <!-- Family-wide theme sync: the xx-launcher targets this package
+             explicitly (required since Android O for manifest receivers)
+             with its active-theme broadcast. -->
+        <receiver
+            android:name=".theme.ThemeSyncReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="xx.launcher.THEME_CHANGED" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>
