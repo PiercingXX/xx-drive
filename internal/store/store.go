@@ -66,6 +66,10 @@ type User struct {
 	IsAdmin      bool
 	Disabled     bool
 	CreatedAt    int64
+	// FabricID is the estate account id (xx-chat users.id) for a user that
+	// authenticates through estate SSO; empty for a local password user.
+	// Populated only by GetOrCreateFabricUser / UserByFabricID.
+	FabricID string
 }
 
 type Session struct {
@@ -128,7 +132,8 @@ func (s *Store) migrate() error {
 			password_hash TEXT NOT NULL,
 			is_admin      INTEGER NOT NULL DEFAULT 0,
 			disabled      INTEGER NOT NULL DEFAULT 0,
-			created_at    INTEGER NOT NULL
+			created_at    INTEGER NOT NULL,
+			fabric_id     TEXT
 		)`,
 		`CREATE TABLE IF NOT EXISTS sessions (
 			token_hash TEXT PRIMARY KEY,
@@ -188,6 +193,18 @@ func (s *Store) migrate() error {
 			return fmt.Errorf("migrate: %w", err)
 		}
 	}
+	// Additive migration for DBs created before estate-SSO: give existing
+	// users tables the fabric_id column. Idempotent — a "duplicate column"
+	// error just means a fresh DB already has it from the CREATE above.
+	if _, err := s.db.Exec(`ALTER TABLE users ADD COLUMN fabric_id TEXT`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column") {
+		return fmt.Errorf("migrate fabric_id: %w", err)
+	}
+	// A partial unique index: at most one user row per estate identity, while
+	// local (password) users keep fabric_id NULL and stay unconstrained.
+	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_fabric ON users(fabric_id) WHERE fabric_id IS NOT NULL`); err != nil {
+		return fmt.Errorf("migrate fabric idx: %w", err)
+	}
 	return nil
 }
 
@@ -215,19 +232,65 @@ func (s *Store) CreateUser(username string, passwordHash []byte, isAdmin bool) (
 }
 
 func (s *Store) UserByName(username string) (*User, error) {
-	row := s.db.QueryRow(`SELECT id, username, password_hash, is_admin, disabled, created_at FROM users WHERE username = ?`, username)
+	row := s.db.QueryRow(`SELECT id, username, password_hash, is_admin, disabled, created_at, fabric_id FROM users WHERE username = ?`, username)
 	return scanUser(row)
 }
 
 func (s *Store) UserByID(id int64) (*User, error) {
-	row := s.db.QueryRow(`SELECT id, username, password_hash, is_admin, disabled, created_at FROM users WHERE id = ?`, id)
+	row := s.db.QueryRow(`SELECT id, username, password_hash, is_admin, disabled, created_at, fabric_id FROM users WHERE id = ?`, id)
 	return scanUser(row)
 }
 
-func scanUser(row interface{ Scan(...any) error }) (*User, error) {
+// fabricShadowUsername is the storage-isolation key (and files/<name> directory)
+// for an estate-SSO user. It is derived ONLY from the validated token's user_id,
+// namespaced with a prefix so it can never collide with a human-chosen local
+// username and is self-documenting on disk.
+func fabricShadowUsername(fabricID string) string { return "fabric_" + fabricID }
+
+// GetOrCreateFabricUser resolves an estate account id (from a validated fabric
+// token) to the local shadow user that owns that identity's drive, creating it
+// on first sight. The returned user's Username is the per-user storage key used
+// everywhere downstream (files/<username>, and the integer ID for metadata
+// tables). The shadow user has an unusable password hash — it can never log in
+// via the local password path; the only way to become this user is to present a
+// valid fabric token for the same user_id.
+func (s *Store) GetOrCreateFabricUser(fabricID string) (*User, error) {
+	if fabricID == "" || strings.ContainsAny(fabricID, "/\\\x00") || len(fabricID) > 200 {
+		return nil, fmt.Errorf("%w: invalid fabric id", ErrNotFound)
+	}
+	if u, err := s.UserByFabricID(fabricID); err == nil {
+		if u.Disabled {
+			return nil, ErrDisabled
+		}
+		return u, nil
+	} else if !errors.Is(err, ErrNotFound) {
+		return nil, err
+	}
+	// First sight: create the shadow row. "!" is a hash that can never match
+	// CheckPassword (wrong scheme prefix), so password login is impossible.
+	uname := fabricShadowUsername(fabricID)
+	_, err := s.db.Exec(`INSERT INTO users (username, password_hash, is_admin, created_at, fabric_id) VALUES (?,?,?,?,?)`,
+		uname, "!", 0, time.Now().Unix(), fabricID)
+	if err != nil {
+		// Lost a create race, or username already taken — fall back to lookup.
+		if u, lerr := s.UserByFabricID(fabricID); lerr == nil {
+			if u.Disabled {
+				return nil, ErrDisabled
+			}
+			return u, nil
+		}
+		return nil, err
+	}
+	return s.UserByFabricID(fabricID)
+}
+
+// UserByFabricID looks up the shadow user for an estate identity.
+func (s *Store) UserByFabricID(fabricID string) (*User, error) {
+	row := s.db.QueryRow(`SELECT id, username, password_hash, is_admin, disabled, created_at, fabric_id FROM users WHERE fabric_id = ?`, fabricID)
 	var u User
 	var isAdmin, disabled int
-	err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &isAdmin, &disabled, &u.CreatedAt)
+	var fid sql.NullString
+	err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &isAdmin, &disabled, &u.CreatedAt, &fid)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -236,6 +299,24 @@ func scanUser(row interface{ Scan(...any) error }) (*User, error) {
 	}
 	u.IsAdmin = isAdmin == 1
 	u.Disabled = disabled == 1
+	u.FabricID = fid.String
+	return &u, nil
+}
+
+func scanUser(row interface{ Scan(...any) error }) (*User, error) {
+	var u User
+	var isAdmin, disabled int
+	var fid sql.NullString
+	err := row.Scan(&u.ID, &u.Username, &u.PasswordHash, &isAdmin, &disabled, &u.CreatedAt, &fid)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	u.IsAdmin = isAdmin == 1
+	u.Disabled = disabled == 1
+	u.FabricID = fid.String
 	return &u, nil
 }
 

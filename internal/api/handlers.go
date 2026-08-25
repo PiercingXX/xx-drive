@@ -84,6 +84,60 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}})
 }
 
+// handleFabricLogin is the estate-SSO entry for the browser: exchange a
+// ClusterKeyring v1 token (minted by xx-chat's POST /api/v1/fabric/login) for a
+// normal xx-drive session cookie backed by the same estate identity. The token
+// may arrive in the JSON body {"token": "v1..."} or as Authorization: Bearer.
+// No password is ever seen here — xx-chat is the account/password authority;
+// this node only validates the token locally against the shared keyring.
+func (s *Server) handleFabricLogin(w http.ResponseWriter, r *http.Request) {
+	if s.ring == nil {
+		writeErr(w, http.StatusServiceUnavailable, "fabric auth not configured")
+		return
+	}
+	var req struct {
+		Token string `json:"token"`
+	}
+	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+		req.Token = strings.TrimPrefix(h, "Bearer ")
+	} else if err := decodeJSON(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Token == "" {
+		writeErr(w, http.StatusBadRequest, "missing token")
+		return
+	}
+	uid, err := s.ring.UserIDFor("Bearer "+req.Token, s.now())
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, "invalid or expired token")
+		return
+	}
+	u, err := s.st.GetOrCreateFabricUser(uid)
+	if err != nil {
+		if err == store.ErrDisabled {
+			writeErr(w, http.StatusForbidden, "account disabled")
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, "identity error")
+		return
+	}
+	tok := newToken(32)
+	if err := s.st.CreateSession(u.ID, tok, "fabric-sso", s.cfg.SessionTTL); err != nil {
+		writeErr(w, 500, "session error")
+		return
+	}
+	s.st.AddEvent(u.ID, "login", "fabric SSO from "+clientIP(r))
+	http.SetCookie(w, &http.Cookie{
+		Name: sessionCookie, Value: tok, Path: "/", HttpOnly: true,
+		SameSite: http.SameSiteLaxMode, MaxAge: int(s.cfg.SessionTTL.Seconds()),
+		Secure: s.cfg.TLSCert != "",
+	})
+	writeJSON(w, 200, map[string]any{"token": tok, "user": map[string]any{
+		"username": u.Username, "isAdmin": u.IsAdmin, "fabric": true,
+	}})
+}
+
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(sessionCookie); err == nil {
 		_ = s.st.DeleteSession(store.HashToken(c.Value))
@@ -97,7 +151,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	u := UserFrom(r)
-	writeJSON(w, 200, map[string]any{"username": u.Username, "isAdmin": u.IsAdmin})
+	writeJSON(w, 200, map[string]any{"username": u.Username, "isAdmin": u.IsAdmin, "fabric": u.FabricID != ""})
 }
 
 func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {

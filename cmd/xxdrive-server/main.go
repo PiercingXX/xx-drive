@@ -13,9 +13,13 @@ import (
 	"time"
 
 	"xxdrive/internal/api"
+	"xxdrive/internal/fabric"
 	"xxdrive/internal/fsdrv"
 	"xxdrive/internal/store"
 )
+
+// Version is the xx-drive server version. Bumped on every deployable change.
+const Version = "1.1.0"
 
 func main() {
 	var cfg api.Config
@@ -27,6 +31,8 @@ func main() {
 	flag.IntVar(&cfg.TrashRetentionDays, "trash-days", 30, "trash retention in days")
 	flag.StringVar(&cfg.TLSCert, "tls-cert", envOr("XXD_TLS_CERT", ""), "TLS certificate path (optional)")
 	flag.StringVar(&cfg.TLSKey, "tls-key", envOr("XXD_TLS_KEY", ""), "TLS key path (optional)")
+	var keyringPath string
+	flag.StringVar(&keyringPath, "keyring", os.Getenv(fabric.EnvKeyringPath), "fabric cluster keyring path for estate SSO (or "+fabric.EnvKeyringPath+"); optional — local admin auth works without it")
 	flag.Parse()
 
 	log.SetFlags(log.LstdFlags | log.LUTC)
@@ -49,7 +55,23 @@ func main() {
 
 	bootstrapAdmin(st)
 
-	srv := api.New(cfg, st, fs)
+	// Estate SSO: load the shared cluster keyring if one is configured. It is
+	// OPTIONAL by design — with no keyring, xx-drive serves only its local
+	// admin/password auth (the operator is never locked out); with one, an
+	// estate account logs in via a fabric token, exactly like xx-note.
+	var ring *fabric.Keyring
+	if keyringPath != "" {
+		r, err := fabric.LoadKeyring(keyringPath)
+		if err != nil {
+			log.Fatalf("fabric keyring: %v", err)
+		}
+		ring = r
+		log.Printf("estate SSO enabled (keyring: %s)", keyringPath)
+	} else {
+		log.Printf("estate SSO disabled (no %s configured) — local auth only", fabric.EnvKeyringPath)
+	}
+
+	srv := api.New(cfg, st, fs, ring)
 	withWeb := srv.Handler()
 
 	janitorStop := startJanitor(cfg, st, fs)
@@ -62,7 +84,7 @@ func main() {
 		IdleTimeout:       120 * time.Second,
 	}
 
-	log.Printf("xx-drive listening on %s (data: %s)", cfg.Addr, dataDir)
+	log.Printf("xx-drive %s listening on %s (data: %s)", Version, cfg.Addr, dataDir)
 	if cfg.TLSCert != "" && cfg.TLSKey != "" {
 		log.Fatal(httpSrv.ListenAndServeTLS(cfg.TLSCert, cfg.TLSKey))
 	} else {

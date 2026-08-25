@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"xxdrive/internal/fabric"
 	"xxdrive/internal/fsdrv"
 	"xxdrive/internal/store"
 	"xxdrive/internal/webfs"
@@ -29,12 +30,15 @@ type Config struct {
 	TrashRetentionDays int
 	TLSCert            string
 	TLSKey             string
+
+	nowFunc func() time.Time // test hook for token-expiry checks; nil means time.Now
 }
 
 type Server struct {
 	cfg    Config
 	st     *store.Store
 	fs     *fsdrv.Driver
+	ring   *fabric.Keyring // estate-SSO validator; nil when no keyring is configured
 	mux    *http.ServeMux
 	pubMu  sync.Mutex
 	pubGr  map[string]map[string]int64 // tokenHash -> grant -> expiry
@@ -43,7 +47,10 @@ type Server struct {
 	userMu sync.Map // username -> *sync.Mutex (per-user mutation serialization)
 }
 
-func New(cfg Config, st *store.Store, fs *fsdrv.Driver) *Server {
+// New builds the server. ring may be nil: when no estate keyring is configured
+// the fabric-SSO paths report "not configured" and only the local
+// admin/password auth is served, so the operator is never locked out.
+func New(cfg Config, st *store.Store, fs *fsdrv.Driver, ring *fabric.Keyring) *Server {
 	if cfg.MaxUploadMB <= 0 {
 		cfg.MaxUploadMB = 10240
 	}
@@ -53,10 +60,18 @@ func New(cfg Config, st *store.Store, fs *fsdrv.Driver) *Server {
 	if cfg.TrashRetentionDays <= 0 {
 		cfg.TrashRetentionDays = 30
 	}
-	s := &Server{cfg: cfg, st: st, fs: fs,
+	s := &Server{cfg: cfg, st: st, fs: fs, ring: ring,
 		mux: http.NewServeMux(), pubGr: map[string]map[string]int64{}, rate: map[string]*rateBucket{}}
 	s.routes()
 	return s
+}
+
+// now returns the moment used for token-expiry checks (test-overridable).
+func (s *Server) now() time.Time {
+	if s.cfg.nowFunc != nil {
+		return s.cfg.nowFunc()
+	}
+	return time.Now()
 }
 
 func (s *Server) Handler() http.Handler { return s.recoverPanics(s.logReq(s.securityHeaders(s.mux))) }
@@ -67,6 +82,7 @@ func (s *Server) routes() {
 
 	// auth
 	m.HandleFunc("POST /api/auth/login", s.handleLogin)
+	m.HandleFunc("POST /api/auth/fabric", s.handleFabricLogin)
 	m.HandleFunc("POST /api/auth/logout", s.authed(s.handleLogout))
 	m.HandleFunc("GET /api/auth/me", s.authed(s.handleMe))
 	m.HandleFunc("GET /api/auth/sessions", s.authed(s.handleListSessions))
@@ -205,9 +221,45 @@ func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) *store.Use
 		writeErr(w, http.StatusUnauthorized, "authentication required")
 		return nil
 	}
+	// A ClusterKeyring v1 token (v1.<key>.<body>.<sig>) is an estate-SSO
+	// credential: validate it against the ring and resolve to the caller's
+	// shadow user. Local opaque session tokens never contain dots, so this
+	// dispatch is unambiguous. A malformed/expired/wrong-key fabric token is
+	// rejected outright — it is never re-tried as a local session.
+	if fabric.LooksLikeToken(raw) {
+		if u := s.authenticateFabric(w, raw); u != nil {
+			return u
+		}
+		return nil
+	}
 	_, u, err := s.st.Session(raw, s.cfg.SessionTTL)
 	if err != nil {
 		writeErr(w, http.StatusUnauthorized, "invalid or expired session")
+		return nil
+	}
+	return u
+}
+
+// authenticateFabric validates an estate-SSO token and returns its shadow user.
+// user_id comes from the validated token ONLY — never a header/body/path — and
+// is the sole storage-isolation key for that caller.
+func (s *Server) authenticateFabric(w http.ResponseWriter, token string) *store.User {
+	if s.ring == nil {
+		writeErr(w, http.StatusUnauthorized, "fabric auth not configured")
+		return nil
+	}
+	uid, err := s.ring.UserIDFor("Bearer "+token, s.now())
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, "invalid or expired token")
+		return nil
+	}
+	u, err := s.st.GetOrCreateFabricUser(uid)
+	if err != nil {
+		if errors.Is(err, store.ErrDisabled) {
+			writeErr(w, http.StatusForbidden, "account disabled")
+			return nil
+		}
+		writeErr(w, http.StatusInternalServerError, "identity error")
 		return nil
 	}
 	return u

@@ -249,6 +249,7 @@ All flags read from an env var first if the flag isn't passed
 | `-tls-key` | `XXD_TLS_KEY` | `""` | TLS key path. |
 | *(no flag)* | `XXD_ADMIN_USER` | `admin` | Username for the bootstrap admin (only used when the users table is empty). |
 | *(no flag)* | `XXD_ADMIN_PASSWORD` | *(random, printed once)* | Bootstrap admin password. Set this in production instead of relying on the printed-once random value if you want a known first password. |
+| `-keyring` | `FABRIC_CLUSTER_KEYS_PATH` | `""` | Path to the shared estate cluster keyring (the ClusterKeyring JSON `ClusterKeyring.save` writes). Enables **estate SSO** (§5.1). **Optional** — with no keyring, only local admin/password auth is served, so the operator is never locked out. On the deployed box this is `/srv/deep/skippy-tel-deploy/fabric-keys.json`. |
 
 `SessionTTL` (sliding 30-day expiry) and `MaxUploadMB`/`TrashRetentionDays`
 defaults are also enforced defensively inside `api.New` if a zero/negative
@@ -257,6 +258,48 @@ value is passed through `Config`.
 If no `-tls-cert`/`-tls-key`, the server logs a warning on every start:
 `"WARNING: running without TLS — put behind a reverse proxy or set
 -tls-cert/-tls-key"`.
+
+## 5.1 Estate SSO (fabric identity)
+
+xx-drive joins the estate's single-account fabric, so one estate account
+logs into xx-drive exactly as it does into xx-note / xx-calendar /
+xx-vitals. xx-chat is the account authority (owns the password/PBKDF2 and
+mints tokens at `POST /api/v1/fabric/login`); every app — xx-drive
+included — validates a **ClusterKeyring v1** bearer token **locally**, with
+no call back to xx-chat. The validator (`internal/fabric/token.go`) is the
+same stdlib HMAC verifier xx-note uses, keyed on the shared ring at
+`FABRIC_CLUSTER_KEYS_PATH`.
+
+**Two ways in (both resolve to the same estate identity):**
+
+- **Bearer token** (apps / CLI / Android): send
+  `Authorization: Bearer <v1-token>` on every request. Any credential shaped
+  like a v1 token (`v1.<key>.<body>.<sig>`) is validated against the ring;
+  a local opaque session token — which never contains dots — still takes the
+  legacy session path, so the two never collide.
+- **Browser SSO** — `POST /api/auth/fabric` `{"token":"v1..."}` (or the
+  same `Authorization: Bearer` header): the token is validated once and
+  exchanged for a normal `xxd_session` cookie bound to that estate identity.
+
+**How identity maps to storage isolation.** The validated token yields the
+estate `user_id` (xx-chat `users.id`) — taken from the token **only**, never
+from any body/query/path. On first sight xx-drive get-or-creates a local
+**shadow user** whose username is `fabric_<user_id>` and whose `fabric_id`
+column holds that id (a partial-unique index guarantees one row per estate
+identity; the shadow row has an unusable password hash, so it can never log
+in by password). That `fabric_<user_id>` string is then the ordinary
+per-user isolation key everywhere: the `files/<username>/…` path-containment
+root in `fsdrv` and the integer user-id foreign key on every metadata table
+(shares, stars, versions, events, etag cache). So the existing per-user
+isolation is preserved unchanged — it is simply now keyed on the estate
+`user_id`. A two-user adversarial test
+(`TestFabricTwoUserIsolation`) proves user A's token can never list,
+download, or delete user B's files.
+
+**Local admin auth is retained as a fallback.** The bootstrap admin
+(`XXD_ADMIN_USER`/`XXD_ADMIN_PASSWORD`, PBKDF2, `POST /api/auth/login`)
+keeps working alongside estate SSO — this is deliberate so the operator is
+never locked out and a box with no keyring configured is still fully usable.
 
 ## 5. Security model
 

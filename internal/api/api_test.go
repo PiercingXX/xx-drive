@@ -39,7 +39,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		t.Fatal(err)
 	}
 	cfg := Config{Addr: ":0", MaxUploadMB: 8, SessionTTL: time.Hour, TrashRetentionDays: 30}
-	s := New(cfg, st, fsd)
+	s := New(cfg, st, fsd, nil)
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(func() {
 		ts.Close()
