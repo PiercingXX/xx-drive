@@ -73,7 +73,7 @@ class PhotoUploadWorker(appContext: Context, params: WorkerParameters) :
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
             proj,
             "${MediaStore.Images.Media.DATE_TAKEN} > ?",
-            arrayOf((since / 1000).toString()), // DATE_TAKEN is seconds
+            arrayOf(since.toString()), // DATE_TAKEN is epoch milliseconds
             "${MediaStore.Images.Media.DATE_TAKEN} ASC",
         )?.use { cur ->
             val idCol = cur.getColumnIndexOrThrow(MediaStore.Images.Media._ID)

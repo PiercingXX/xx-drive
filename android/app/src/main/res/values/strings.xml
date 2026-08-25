@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">xx-drive</string>
+    <string name="app_name">XX-Drive</string>
     <string name="server_url">Server URL</string>
     <string name="username">Username</string>
     <string name="password">Password</string>
