@@ -1,4 +1,4 @@
-package com.xxdrive.app
+package com.piercingxx.xxdrive
 
 import android.os.Bundle
 import android.widget.Button

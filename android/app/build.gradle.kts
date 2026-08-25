@@ -4,13 +4,13 @@ plugins {
 }
 
 android {
-    namespace = "com.xxdrive.app"
-    compileSdk = 34
+    namespace = "com.piercingxx.xxdrive"
+    compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.xxdrive.app"
+        applicationId = "com.piercingxx.xxdrive"
         minSdk = 26
-        targetSdk = 34
+        targetSdk = 35
         versionCode = 1
         versionName = "1.0"
     }

@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- PiercingXX design tokens for Android. Source: BRAND-GUIDE.md §3.
+     Drop into app/src/main/res/values/. -->
+<resources>
+    <!-- Core palette. Reserved-white rule: pure #FFFFFF is Signal's alone;
+         body text uses pxx_white_90, never the accent. -->
+    <color name="pxx_ink">#000000</color>
+    <color name="pxx_signal">#FFFFFF</color>
+
+    <!-- Emphasis inverts: Signal block, Ink text -->
+    <color name="pxx_emphasis_bg">#FFFFFF</color>
+    <color name="pxx_emphasis_fg">#000000</color>
+
+    <!-- Neutral ramp -->
+    <color name="pxx_ink_raised">#09090B</color>
+    <color name="pxx_graphite">#131316</color>
+    <color name="pxx_slate">#18181B</color>
+
+    <!-- White-on-ink opacity stops -->
+    <color name="pxx_white_10">#1AFFFFFF</color>
+    <color name="pxx_white_25">#40FFFFFF</color>
+    <color name="pxx_white_50">#80FFFFFF</color>
+    <color name="pxx_white_80">#CCFFFFFF</color>
+    <color name="pxx_white_90">#E6FFFFFF</color>
+
+    <!-- Named background presets -->
+    <color name="pxx_bg_amoled_night">#000000</color>
+    <color name="pxx_bg_graphite">#131316</color>
+    <color name="pxx_bg_forest_night">#10261B</color>
+    <color name="pxx_bg_ocean_drift">#0F1C2E</color>
+    <color name="pxx_bg_burgundy">#2A1018</color>
+    <color name="pxx_bg_paper">#F3EEE2</color>
+    <color name="pxx_bg_mist">#E6EDF5</color>
+
+    <!-- Product signal accents (one per product; added only when claimed) -->
+    <color name="pxx_accent_white">#FFFFFF</color>
+    <color name="pxx_accent_blue">#82E2FF</color>
+
+    <!-- Rare colors: extremely reserved — at most one instance per screen,
+         exceptional moments only; never chrome, never a second accent -->
+    <color name="pxx_rare_purple">#A277FF</color>
+    <color name="pxx_rare_green">#61FFCA</color>
+
+    <!-- Status: glyph-first; color only when something needs attention -->
+    <color name="pxx_ok">#E6FFFFFF</color>
+    <color name="pxx_warn">#FDBA74</color>
+    <color name="pxx_error">#FF6767</color>
+    <color name="pxx_info">#80FFFFFF</color>
+</resources>

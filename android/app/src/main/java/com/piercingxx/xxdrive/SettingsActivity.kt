@@ -1,4 +1,4 @@
-package com.xxdrive.app
+package com.piercingxx.xxdrive
 
 import android.Manifest
 import android.content.pm.PackageManager

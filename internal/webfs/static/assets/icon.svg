@@ -1,5 +1,19 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="96" fill="#0f1420"/>
-  <path d="M148 340a72 72 0 1 1 14-142 104 104 0 0 1 199 27 64 64 0 0 1-9 115H148z"
-        fill="none" stroke="#4f8ef7" stroke-width="28" stroke-linejoin="round"/>
+  <!-- PiercingXX logomark: two stacked X's over an underline, Signal white on Ink -->
+  <rect width="512" height="512" rx="96" fill="#000000"/>
+  <g transform="translate(256 256) scale(0.72) translate(-256 -256)">
+    <g transform="rotate(45 256 157)">
+      <path fill="#FFFFFF" d="M228,85 a28,28 0 0 1 56,0 L284,229 a28,28 0 0 1 -56,0 Z"/>
+    </g>
+    <g transform="rotate(-45 256 157)">
+      <path fill="#FFFFFF" d="M228,85 a28,28 0 0 1 56,0 L284,229 a28,28 0 0 1 -56,0 Z"/>
+    </g>
+    <g transform="rotate(45 256 292)">
+      <path fill="#FFFFFF" d="M228,220 a28,28 0 0 1 56,0 L284,364 a28,28 0 0 1 -56,0 Z"/>
+    </g>
+    <g transform="rotate(-45 256 292)">
+      <path fill="#FFFFFF" d="M228,220 a28,28 0 0 1 56,0 L284,364 a28,28 0 0 1 -56,0 Z"/>
+    </g>
+    <path fill="#FFFFFF" d="M183,402 l146,0 a22,22 0 0 1 0,44 l-146,0 a22,22 0 0 1 0,-44 z"/>
+  </g>
 </svg>
