@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.XXDrive" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">#4F8EF7</item>
+        <item name="android:statusBarColor">#0F1420</item>
+        <item name="android:windowBackground">#0F1420</item>
+    </style>
+</resources>

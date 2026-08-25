@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#0f1420">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
+<title>xx-drive</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<!-- login -->
+<div id="loginView">
+  <form class="login-card" id="loginForm">
+    <h1>xx<span>-drive</span></h1>
+    <div class="sub">Your private cloud</div>
+    <label for="liUser">Username</label>
+    <input id="liUser" autocomplete="username" required>
+    <label for="liPass">Password</label>
+    <input id="liPass" type="password" autocomplete="current-password" required>
+    <button class="primary" type="submit">Sign in</button>
+    <div class="err-msg" id="loginErr"></div>
+  </form>
+</div>
+
+<!-- app shell -->
+<div id="appView">
+  <aside class="rail" id="rail">
+    <div class="brand">xx<span>-drive</span></div>
+    <nav id="nav">
+      <button data-view="files" class="active"><span class="ico">&#128193;</span> My Files</button>
+      <button data-view="starred"><span class="ico">&#11088;</span> Starred</button>
+      <button data-view="shares"><span class="ico">&#128279;</span> Shared Links</button>
+      <button data-view="trash"><span class="ico">&#128465;</span> Trash</button>
+      <button data-view="events"><span class="ico">&#128220;</span> Activity</button>
+      <button data-view="admin" id="navAdmin" style="display:none"><span class="ico">&#128101;</span> Admin</button>
+    </nav>
+    <div class="foot" id="whoami"></div>
+  </aside>
+
+  <div class="main">
+    <div class="topbar">
+      <button class="hamburger" id="hamburger">&#9776;</button>
+      <div class="crumbs" id="crumbs"></div>
+      <div class="spacer"></div>
+      <div class="searchbox">
+        <input id="searchInput" placeholder="Search files&#8230;">
+        <button class="small" id="searchBtn">Search</button>
+      </div>
+      <button class="small" id="logoutBtn">Log out</button>
+    </div>
+
+    <div class="content" id="content">
+      <div class="toolbar" id="filesToolbar">
+        <button id="newFolderBtn">+ New folder</button>
+        <button id="uploadBtn">&#8593; Upload</button>
+        <button id="viewToggleBtn">Grid</button>
+        <input type="file" id="fileInput" multiple hidden>
+      </div>
+      <div class="selbar" id="selbar">
+        <span class="count" id="selCount"></span>
+        <button class="small" data-act="download">Download</button>
+        <button class="small" data-act="share">Share</button>
+        <button class="small" data-act="move">Move</button>
+        <button class="small" data-act="copy">Copy</button>
+        <button class="small danger" data-act="delete">Delete</button>
+        <button class="small" data-act="clearsel">Clear</button>
+      </div>
+      <div id="browserArea"></div>
+      <div class="drop-overlay" id="dropOverlay">Drop files to upload</div>
+    </div>
+  </div>
+</div>
+
+<!-- uploads progress -->
+<div class="uploads" id="uploadsPanel">
+  <div class="hd"><span>Uploads</span><button class="small" id="uploadsClose">&times;</button></div>
+  <div id="uploadsList"></div>
+</div>
+
+<!-- generic modal -->
+<div class="modal-back" id="modalBack">
+  <div class="modal" id="modalBox"></div>
+</div>
+
+<!-- lightbox -->
+<div class="lightbox" id="lightbox"></div>
+
+<!-- context menu -->
+<div class="ctx-menu" id="ctxMenu"></div>
+
+<div class="toasts" id="toasts"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

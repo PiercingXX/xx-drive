@@ -1,0 +1,18 @@
+# Built binaries
+/xxdrive-server
+/xxdrive-cli
+
+# Server runtime data
+/data/
+
+# Android build artifacts
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+*.apk
+
+# OS / editor noise
+.DS_Store
+*.swp

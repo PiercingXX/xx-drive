@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">xx-drive</string>
+    <string name="server_url">Server URL</string>
+    <string name="username">Username</string>
+    <string name="password">Password</string>
+    <string name="sign_in">Sign in</string>
+    <string name="settings">Settings</string>
+    <string name="logout">Log out</string>
+    <string name="auto_backup">Auto-upload camera photos</string>
+    <string name="wifi_only">Wi-Fi only</string>
+    <string name="download_started">Download started</string>
+    <string name="backup_on">Camera backup enabled</string>
+    <string name="backup_off">Camera backup disabled</string>
+    <string name="err_all_fields">Please fill in all fields</string>
+    <string name="err_generic">Something went wrong</string>
+    <string name="err_login_failed">Login failed (HTTP %1$d)</string>
+</resources>

@@ -1,0 +1,28 @@
+[Unit]
+Description=xx-drive private cloud storage server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=xxdrive
+Group=xxdrive
+StateDirectory=xxdrive
+ExecStart=/usr/local/bin/xxdrive-server -addr 127.0.0.1:8080 -data /var/lib/xxdrive -base-url https://CHANGE-ME.example.com
+Restart=on-failure
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/xxdrive
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+MemoryDenyWriteExecute=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target
