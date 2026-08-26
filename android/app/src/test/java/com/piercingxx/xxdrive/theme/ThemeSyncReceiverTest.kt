@@ -61,7 +61,7 @@ class ThemeSyncReceiverTest {
     @Test
     fun `exported receiver requires the signature-level theme-sync permission`() {
         assertEquals(
-            "com.piercingxx.xxdrive.permission.THEME_SYNC",
+            "com.piercingxx.xxlauncher.permission.THEME_SYNC",
             ThemeSyncReceiver.PERMISSION_THEME_SYNC,
         )
         // The receiver demands the permission from any broadcaster...

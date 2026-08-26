@@ -75,7 +75,7 @@ class ThemeSyncReceiver(
          * declared in AndroidManifest.xml and required on the receiver there;
          * only apps signed with our cert (the xx-launcher) can hold it.
          */
-        const val PERMISSION_THEME_SYNC = "com.piercingxx.xxdrive.permission.THEME_SYNC"
+        const val PERMISSION_THEME_SYNC = "com.piercingxx.xxlauncher.permission.THEME_SYNC"
 
         /** String extra: the active theme's display name (or "Custom"). */
         const val EXTRA_THEME_NAME = "xx.launcher.extra.THEME_NAME"

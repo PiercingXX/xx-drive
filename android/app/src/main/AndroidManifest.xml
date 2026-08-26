@@ -6,13 +6,13 @@
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
 
-    <!-- Only apps signed with OUR certificate (the xx-launcher) can hold this
-         permission, so arbitrary apps can no longer broadcast-recolor the
-         chrome. The launcher adds <uses-permission> for it; the signature
-         check grants it at install time. -->
+    <!-- Family theme-sync. XX-Launcher sendBroadcast()s with this signature
+         permission; uses-permission is required to receive it. Declared here
+         too so install order against the launcher does not drop the grant. -->
     <permission
-        android:name="com.piercingxx.xxdrive.permission.THEME_SYNC"
+        android:name="com.piercingxx.xxlauncher.permission.THEME_SYNC"
         android:protectionLevel="signature" />
+    <uses-permission android:name="com.piercingxx.xxlauncher.permission.THEME_SYNC" />
 
     <application
         android:name=".XxDriveApp"
@@ -45,7 +45,7 @@
         <receiver
             android:name=".theme.ThemeSyncReceiver"
             android:exported="true"
-            android:permission="com.piercingxx.xxdrive.permission.THEME_SYNC">
+            android:permission="com.piercingxx.xxlauncher.permission.THEME_SYNC">
             <intent-filter>
                 <action android:name="xx.launcher.THEME_CHANGED" />
             </intent-filter>
