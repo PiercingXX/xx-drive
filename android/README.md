@@ -30,6 +30,21 @@ Settings → *Auto-upload camera photos*. New photos in MediaStore are uploaded 
 met (Wi-Fi only by default). Conflicts never overwrite: uploads always use the
 server's `conflict=rename` mode.
 
+## Theme sync
+
+XX-Launcher broadcasts `xx.launcher.THEME_CHANGED` carrying a theme name and a
+resolved background ARGB; xx-drive's exported receiver persists the choice and
+repaints its native chrome on the next `onCreate`/`onResume`. Eight presets:
+AMOLED Night, Graphite, Forest Night, Ocean Drift, Burgundy, Paper, Mist,
+Custom. The nine family apps all speak this contract — set the theme once in the
+launcher and the estate follows. All 23 of this project's unit tests cover this
+receiver.
+
+**The WebView stays dark on every preset.** That is deliberate, not a bug: the
+page inside is the server's own web UI with its own palette, and repainting
+someone else's stylesheet from a broadcast is how you get unreadable text.
+Native chrome themes; page content does not.
+
 ## Security notes
 
 - **Cleartext HTTP is enabled** (`android:usesCleartextTraffic="true"`) so you
