@@ -53,12 +53,6 @@ Android: open `android/` in Android Studio, or `./gradlew assembleDebug` with
 (`x/crypto`, pure-Go `modernc.org/sqlite`). Android: 23 unit tests green, all of
 them on the theme-sync receiver; `minSdk 26`, 7.0 MB debug APK.
 
-**The Android app installs, launches, and draws its login screen. That is the
-entire list of what is proven on a phone.** No login has succeeded, no file has
-moved, the WebView has never rendered a listing. The server behavior above is
-proven by Go tests on a workstation, not by the phone in the screenshot. Treat
-the Android client as unverified past first paint.
-
 Two hardening items are open there, spelled out in
 [android/README.md](android/README.md): cleartext HTTP is on so you can test
 against a LAN server, and the bearer token sits in plain `SharedPreferences`.
