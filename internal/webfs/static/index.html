@@ -22,6 +22,12 @@
     <input id="liPass" type="password" autocomplete="current-password" required>
     <button class="primary" type="submit">Sign in</button>
     <div class="err-msg" id="loginErr"></div>
+    <div class="login-divider"><span>or</span></div>
+    <div class="estate-title">Estate sign-in</div>
+    <label for="liToken">Estate token</label>
+    <input id="liToken" placeholder="ClusterKeyring v1 token">
+    <button id="fabricBtn" type="button">Sign in with estate token</button>
+    <div class="err-msg" id="fabricErr"></div>
   </form>
 </div>
 
@@ -49,6 +55,7 @@
         <input id="searchInput" placeholder="Search files&#8230;">
         <button class="small" id="searchBtn">Search</button>
       </div>
+      <button class="small" id="accountBtn">Account</button>
       <button class="small" id="logoutBtn">Log out</button>
     </div>
 
@@ -56,8 +63,10 @@
       <div class="toolbar" id="filesToolbar">
         <button id="newFolderBtn">+ New folder</button>
         <button id="uploadBtn">&#8593; Upload</button>
+        <button id="folderUploadBtn">&#8593; Folder</button>
         <button id="viewToggleBtn">Grid</button>
         <input type="file" id="fileInput" multiple hidden>
+        <input type="file" id="dirInput" webkitdirectory multiple hidden>
       </div>
       <div class="selbar" id="selbar">
         <span class="count" id="selCount"></span>

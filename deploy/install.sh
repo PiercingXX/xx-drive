@@ -1,6 +1,24 @@
 #!/usr/bin/env bash
 # Install xx-drive on a Debian/Ubuntu server as a systemd service.
-# Run as root:  ./install.sh [base-url]
+#
+# Run as root:
+#   ./install.sh https://drive.example.com
+#
+# Optional environment (all default to a plain-HTTP loopback deploy):
+#   XXD_TLS_CERT / XXD_TLS_KEY    paths to a cert/key pair — adds -tls-cert/-tls-key
+#                                 so the server terminates TLS itself. If you front
+#                                 the server with Caddy/nginx instead, leave these
+#                                 unset and pass XXD_SECURE_COOKIES=1.
+#   XXD_SECURE_COOKIES            "1" adds -secure-cookies (set this whenever TLS
+#                                 terminates at a reverse proxy).
+#   FABRIC_CLUSTER_KEYS_PATH      path to the estate cluster keyring JSON — adds
+#                                 -keyring and enables fabric SSO.
+#   XXD_ADMIN_PASSWORD            known password for the first-boot admin user.
+#                                 Written root-only to /etc/default/xxdrive;
+#                                 DELETE that entry after first login.
+#
+# See deploy/Caddyfile.example / deploy/nginx.conf.example for TLS termination,
+# and the drop-in example printed at the end of a successful install.
 set -euo pipefail
 
 BASE_URL="${1:-}"
@@ -9,7 +27,8 @@ if [[ -z "$BASE_URL" ]]; then
   exit 1
 fi
 
-# Build (requires Go >= 1.22) or use a prebuilt binary placed next to this script.
+# Build (requires Go >= 1.25; go.mod pins go 1.25.0) or use a prebuilt binary
+# placed next to this script.
 cd "$(dirname "$0")/.."
 if command -v go >/dev/null 2>&1; then
   echo "==> building binaries"
@@ -29,7 +48,42 @@ chown xxdrive:xxdrive /var/lib/xxdrive
 echo "==> installing binaries + unit"
 install -m 0755 /tmp/xxdrive-server /usr/local/bin/xxdrive-server
 [[ -f /tmp/xxdrive-cli ]] && install -m 0755 /tmp/xxdrive-cli /usr/local/bin/xxdrive-cli
+
+# Template the base URL into the unit, then append any extra server flags.
+EXTRA_FLAGS=""
+if [[ -n "${XXD_TLS_CERT:-}" && -n "${XXD_TLS_KEY:-}" ]]; then
+  EXTRA_FLAGS+=" -tls-cert ${XXD_TLS_CERT} -tls-key ${XXD_TLS_KEY}"
+elif [[ -n "${XXD_TLS_CERT:-}" || -n "${XXD_TLS_KEY:-}" ]]; then
+  echo "!! set BOTH XXD_TLS_CERT and XXD_TLS_KEY (or neither)" >&2
+  exit 1
+fi
+if [[ "${XXD_SECURE_COOKIES:-0}" == "1" ]]; then
+  EXTRA_FLAGS+=" -secure-cookies"
+fi
+if [[ -n "${FABRIC_CLUSTER_KEYS_PATH:-}" ]]; then
+  EXTRA_FLAGS+=" -keyring ${FABRIC_CLUSTER_KEYS_PATH}"
+fi
 sed "s|https://CHANGE-ME.example.com|${BASE_URL}|g" deploy/xxdrive.service > /etc/systemd/system/xxdrive.service
+if [[ -n "$EXTRA_FLAGS" ]]; then
+  sed -i "s|^ExecStart=.*$|&${EXTRA_FLAGS}|" /etc/systemd/system/xxdrive.service
+fi
+
+# Known first-boot admin password goes into an EnvironmentFile the unit loads
+# (root-only readable). bootstrapAdmin only uses it while the users table is
+# empty, but the secret would still sit on disk — remove it after first login.
+if [[ -n "${XXD_ADMIN_PASSWORD:-}" ]]; then
+  # systemd parses EnvironmentFile values itself (not shell %q rules), so
+  # refuse characters whose meaning differs between the two parsers rather
+  # than storing a silently-wrong password.
+  if [[ "$XXD_ADMIN_PASSWORD" == *['"\$\']* || "$XXD_ADMIN_PASSWORD" == *$'\n'* ]]; then
+    echo "!! XXD_ADMIN_PASSWORD contains a character that is unsafe in a systemd EnvironmentFile (\", \\, \$, newline)." >&2
+    echo "   Pick a simpler bootstrap password, or set it by hand instead:" >&2
+    echo "     systemctl edit xxdrive   # [Service] / Environment=XXD_ADMIN_PASSWORD=..." >&2
+    exit 1
+  fi
+  install -m 0600 /dev/null /etc/default/xxdrive
+  printf 'XXD_ADMIN_PASSWORD=%s\n' "$XXD_ADMIN_PASSWORD" > /etc/default/xxdrive
+fi
 
 echo "==> enabling service"
 systemctl daemon-reload
@@ -40,13 +94,37 @@ systemctl --no-pager status xxdrive | head -12
 cat <<'NOTE'
 
 === Installation complete ===
-The first start generated an admin password — read it once with:
 
-    journalctl -u xxdrive | grep "created admin user" -A4
+First start: if no admin existed, one was created.
+
+  * With XXD_ADMIN_PASSWORD set at install time: log in with that password,
+    then remove it from /etc/default/xxdrive.
+  * Without it: read the generated one-time password now:
+
+      journalctl -u xxdrive | grep "created admin user" -A4
+
+Lost the admin password later? Reset it (prompts twice, no echo):
+
+      systemctl stop xxdrive
+      sudo -u xxdrive xxdrive-server -data /var/lib/xxdrive -passwd admin
+      systemctl start xxdrive
+
+TLS: this unit serves plain HTTP on 127.0.0.1:8080. Either terminate TLS at a
+reverse proxy (deploy/Caddyfile.example or deploy/nginx.conf.example) AND add
+`-secure-cookies` to ExecStart, e.g.:
+
+      systemctl edit xxdrive
+        [Service]
+        ExecStart=
+        ExecStart=/usr/local/bin/xxdrive-server -addr 127.0.0.1:8080 \
+          -data /var/lib/xxdrive -base-url https://drive.example.com \
+          -secure-cookies
+
+...or re-run this script with XXD_TLS_CERT/XXD_TLS_KEY to have the server do
+TLS itself. Fabric SSO: re-run with FABRIC_CLUSTER_KEYS_PATH=/path/to/keyring.json
+(or add `-keyring ...` in the same drop-in).
 
 Then:
-  * Put a TLS reverse proxy (Caddy/nginx) in front of port 8080, or edit
-    /etc/systemd/system/xxdrive.service to add -tls-cert/-tls-key.
   * Log into the web UI at your base URL and change the admin password.
   * Linux clients:  xxdrive-cli login <url> <user>   then  xxdrive-cli sync ~/Drive /<user-dir>
 NOTE

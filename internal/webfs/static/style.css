@@ -52,6 +52,18 @@ a { color: var(--accent); text-decoration: none; }
 .login-card button { width: 100%; margin-top: 18px; padding: 10px; }
 .err-msg { color: var(--danger); font-size: 13px; margin-top: 10px; min-height: 16px; }
 
+/* login: estate sign-in */
+.login-divider {
+  display: flex; align-items: center; gap: 10px;
+  color: var(--muted); font-size: 12px; margin-top: 22px;
+}
+.login-divider::before, .login-divider::after {
+  content: ""; flex: 1; height: 1px; background: var(--border);
+}
+.estate-title { color: var(--muted); font-size: 13px; margin-top: 14px; }
+#liToken { width: 100%; margin-top: 5px; }
+#fabricBtn { font-size: 13px; padding: 8px; }
+
 /* ---- shell ---- */
 #appView { display: none; height: 100vh; }
 #appView.on { display: flex; }
@@ -157,8 +169,10 @@ table.files tr.row.selected td { background: rgba(255, 255, 255, .12); }
 .up-item .bar { height: 4px; background: var(--panel2); border-radius: 2px; margin-top: 6px; overflow: hidden; }
 .up-item .bar i { display: block; height: 100%; background: var(--accent); width: 0%; transition: width .2s; }
 .up-item.done .bar i { background: var(--ok); }
+.up-item.conflict .bar i { background: var(--warn); }
 .up-item.fail .bar i { background: var(--danger); }
-.up-item .row1 { display: flex; justify-content: space-between; gap: 8px; }
+.up-item .row1 { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+.up-item .up-actions { flex: 1; text-align: right; }
 .up-item .x { background: none; border: none; color: var(--muted); padding: 0 4px; }
 
 /* ---- modal / menus / toasts ---- */
@@ -176,6 +190,14 @@ table.files tr.row.selected td { background: rgba(255, 255, 255, .12); }
 .modal input[type=text], .modal input[type=password], .modal input[type=number] { width: 100%; }
 .modal .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
 .modal .row { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+.modal .sect {
+  margin: 18px 0 6px; font-size: 12px; letter-spacing: .4px;
+  text-transform: uppercase; color: var(--muted);
+}
+.tag-current {
+  color: var(--accent); border: 1px solid var(--border);
+  padding: 1px 8px; border-radius: 99px; font-size: 11px; white-space: nowrap;
+}
 .share-row {
   display: flex; align-items: center; gap: 8px; padding: 7px 0;
   border-bottom: 1px solid rgba(255, 255, 255, .1); font-size: 13px; flex-wrap: wrap;

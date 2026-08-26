@@ -59,6 +59,21 @@ class ThemeSyncReceiverTest {
     }
 
     @Test
+    fun `exported receiver requires the signature-level theme-sync permission`() {
+        assertEquals(
+            "com.piercingxx.xxdrive.permission.THEME_SYNC",
+            ThemeSyncReceiver.PERMISSION_THEME_SYNC,
+        )
+        // The receiver demands the permission from any broadcaster...
+        val receiverBlock = manifestText.substringAfter(".theme.ThemeSyncReceiver").substringBefore("</receiver>")
+        assertTrue(receiverBlock.contains("android:permission=\"${ThemeSyncReceiver.PERMISSION_THEME_SYNC}\""))
+        // ...and the permission is declared in this manifest as signature-level.
+        val permBlock = manifestText.substringBefore("<application").substringAfter("<permission")
+        assertTrue(permBlock.contains(ThemeSyncReceiver.PERMISSION_THEME_SYNC))
+        assertTrue(permBlock.contains("protectionLevel=\"signature\""))
+    }
+
+    @Test
     fun `declared receiver name resolves to a class`() {
         // Throws ClassNotFoundException if the declared name is not a real class.
         Class.forName("com.piercingxx.xxdrive.theme.ThemeSyncReceiver")

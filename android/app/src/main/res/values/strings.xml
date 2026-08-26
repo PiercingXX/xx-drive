@@ -12,6 +12,7 @@
     <string name="download_started">Download started</string>
     <string name="backup_on">Camera backup enabled</string>
     <string name="backup_off">Camera backup disabled</string>
+    <string name="backup_permission_denied">Photo access denied — camera backup stays off</string>
     <string name="err_all_fields">Please fill in all fields</string>
     <string name="err_generic">Something went wrong</string>
     <string name="err_login_failed">Login failed (HTTP %1$d)</string>

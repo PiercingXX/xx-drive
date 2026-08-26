@@ -1,0 +1,44 @@
+# Caddy reverse proxy for xx-drive — TLS termination in front of the server.
+# Install to /etc/caddy/Caddyfile (adjust the hostname), then:
+#   systemctl reload caddy
+#
+# The xxdrive unit must keep binding 127.0.0.1:8080 (plain HTTP behind the
+# proxy) and MUST run with `-secure-cookies` so session/share cookies carry
+# the Secure attribute (the server does not trust X-Forwarded-Proto; see
+# docs/MANUAL.md §4). install.sh templates that flag when you re-run it with
+# XXD_SECURE_COOKIES=1.
+
+drive.example.com {
+	# Proxy everything to the local server.
+	reverse_proxy 127.0.0.1:8080 {
+		# Send the real host so the server's CSRF same-origin check
+		# (Origin/Referer vs r.Host) keeps working.
+		header_up Host {host}
+	}
+
+	# Large uploads: match -max-upload-mb (default 10240 MB). Caddy has no
+	# request-body cap by default; this only guards against runaway clients.
+	request_body {
+		max_size 10GB
+	}
+
+	# /api/events is plain JSON polling today (no WebSocket/SSE), so no
+	# flush/upgrade tuning is required. If it ever becomes a stream, add:
+	#   @events path /api/events
+	#   handle @events {
+	#       reverse_proxy 127.0.0.1:8080 {
+	#           flush_interval -1
+	#       }
+	#   }
+
+	# /healthz is unauthenticated by design (todo: fingerprinting is a LOW
+	# concern). Keep it off the public internet if you care: return an empty
+	# 404 for everyone except loopback/private sources.
+	@notlocal not remote_ip 127.0.0.1 ::1 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16
+	handle_path /healthz* {
+		respond @notlocal 404
+		respond "ok" 200
+	}
+
+	# Everything else goes through reverse_proxy above.
+}

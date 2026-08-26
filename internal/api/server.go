@@ -31,17 +31,29 @@ type Config struct {
 	TLSCert            string
 	TLSKey             string
 
+	// SecureCookies forces the Secure attribute on session and share-grant
+	// cookies (-secure-cookies) for deployments where TLS terminates at a
+	// reverse proxy. Secure is also set automatically when TLSCert is
+	// configured or BaseURL starts with https://.
+	SecureCookies bool
+
 	nowFunc func() time.Time // test hook for token-expiry checks; nil means time.Now
 }
 
 type Server struct {
-	cfg    Config
-	st     *store.Store
-	fs     *fsdrv.Driver
-	ring   *fabric.Keyring // estate-SSO validator; nil when no keyring is configured
-	mux    *http.ServeMux
-	pubMu  sync.Mutex
-	pubGr  map[string]map[string]int64 // tokenHash -> grant -> expiry
+	cfg  Config
+	st   *store.Store
+	fs   *fsdrv.Driver
+	ring *fabric.Keyring // estate-SSO validator; nil when no keyring is configured
+	mux  *http.ServeMux
+
+	pubMu sync.Mutex
+	pubGr map[string]map[string]int64 // tokenHash -> grant -> expiry
+
+	shareMu       sync.Mutex              // guards shareIdx / shareIdxStale
+	shareIdx      map[string]*store.Share // 16-char hash prefix -> live share snapshot
+	shareIdxStale bool                    // true when shareIdx must be rebuilt from the store
+
 	rateMu sync.Mutex
 	rate   map[string]*rateBucket
 	userMu sync.Map // username -> *sync.Mutex (per-user mutation serialization)
@@ -61,7 +73,11 @@ func New(cfg Config, st *store.Store, fs *fsdrv.Driver, ring *fabric.Keyring) *S
 		cfg.TrashRetentionDays = 30
 	}
 	s := &Server{cfg: cfg, st: st, fs: fs, ring: ring,
-		mux: http.NewServeMux(), pubGr: map[string]map[string]int64{}, rate: map[string]*rateBucket{}}
+		mux:           http.NewServeMux(),
+		pubGr:         map[string]map[string]int64{},
+		rate:          map[string]*rateBucket{},
+		shareIdxStale: true, // rebuild prefix index on first lookup after start
+	}
 	s.routes()
 	return s
 }
@@ -74,6 +90,13 @@ func (s *Server) now() time.Time {
 	return time.Now()
 }
 
+// secureCookies reports whether cookies should carry the Secure attribute:
+// in-process TLS is on, BaseURL is https (TLS terminates at the proxy), or
+// the operator forced it with -secure-cookies.
+func (s *Server) secureCookies() bool {
+	return s.cfg.TLSCert != "" || strings.HasPrefix(s.cfg.BaseURL, "https://") || s.cfg.SecureCookies
+}
+
 func (s *Server) Handler() http.Handler { return s.recoverPanics(s.logReq(s.securityHeaders(s.mux))) }
 
 func (s *Server) routes() {
@@ -83,10 +106,11 @@ func (s *Server) routes() {
 	// auth
 	m.HandleFunc("POST /api/auth/login", s.handleLogin)
 	m.HandleFunc("POST /api/auth/fabric", s.handleFabricLogin)
-	m.HandleFunc("POST /api/auth/logout", s.authed(s.handleLogout))
+	m.HandleFunc("POST /api/auth/logout", s.authedMutating(s.handleLogout))
 	m.HandleFunc("GET /api/auth/me", s.authed(s.handleMe))
 	m.HandleFunc("GET /api/auth/sessions", s.authed(s.handleListSessions))
-	m.HandleFunc("POST /api/auth/sessions/revoke-others", s.authed(s.handleRevokeOthers))
+	m.HandleFunc("POST /api/auth/sessions/revoke-others", s.authedMutating(s.handleRevokeOthers))
+	m.HandleFunc("POST /api/auth/password", s.authedMutating(s.handlePasswordChange))
 
 	// files
 	m.HandleFunc("GET /api/files/list", s.authed(s.handleList))
@@ -127,11 +151,13 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /s/{token}/list", s.handlePublicList)
 	m.HandleFunc("GET /s/{token}/download", s.handlePublicDownload)
 
-	// admin
+	// admin — mutations go through BOTH the admin check and the CSRF
+	// mutating policy (adminOnly alone skips Origin/X-Requested-With)
 	m.HandleFunc("GET /api/admin/users", s.adminOnly(s.handleAdminListUsers))
-	m.HandleFunc("POST /api/admin/users", s.adminOnly(s.handleAdminCreateUser))
-	m.HandleFunc("POST /api/admin/users/set-state", s.adminOnly(s.handleAdminSetState))
-	m.HandleFunc("POST /api/admin/users/password", s.adminOnly(s.handleAdminSetPassword))
+	m.HandleFunc("POST /api/admin/users", s.adminMutating(s.handleAdminCreateUser))
+	m.HandleFunc("POST /api/admin/users/set-state", s.adminMutating(s.handleAdminSetState))
+	m.HandleFunc("POST /api/admin/users/password", s.adminMutating(s.handleAdminSetPassword))
+	m.HandleFunc("POST /api/admin/users/delete", s.adminMutating(s.handleAdminDeleteUser))
 
 	// embedded web app (SPA) — catch-all for everything else
 	m.Handle("GET /", webfs.Handler())
@@ -161,18 +187,49 @@ func (s *Server) authed(next http.HandlerFunc) http.HandlerFunc {
 
 // authedMutating additionally enforces CSRF defenses for cookie-based callers
 // (bearer-token clients like the CLI are exempt — no ambient credentials).
+//
+// Cookie callers pass when:
+//   - Origin/Referer matches the request host (the browser SPA — browsers
+//     send Origin on cross-origin POSTs, so a match proves same-origin), or
+//   - Origin/Referer are absent AND X-Requested-With is set. Browsers refuse
+//     to attach custom headers to cross-site requests without a successful
+//     CORS preflight (this server never answers preflights), and HTML forms
+//     cannot carry them at all — so presence of the header certifies a
+//     deliberate non-browser client (curl/scripts) rather than a drive-by
+//     form post riding on ambient cookies.
 func (s *Server) authedMutating(next http.HandlerFunc) http.HandlerFunc {
-	return s.authed(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") == "" && !s.sameOrigin(r) {
-			writeErr(w, http.StatusForbidden, "cross-origin request rejected")
-			return
+	return s.authed(s.mutating(next))
+}
+
+// mutating applies the CSRF defenses and per-user serialization. It assumes
+// the caller has already authenticated (authedMutating wraps it in s.authed;
+// adminMutating composes it after the admin check so authentication runs
+// exactly once). Bearer-token clients like the CLI carry an Authorization
+// header and skip the origin checks entirely — no ambient credentials.
+func (s *Server) mutating(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "" {
+			switch {
+			case s.sameOrigin(r):
+				// same-origin browser SPA
+			case originAbsent(r) && r.Header.Get(csrfHeader) != "":
+				// non-browser client that explicitly marked its XHR
+			default:
+				writeErr(w, http.StatusForbidden, "cross-origin request rejected")
+				return
+			}
 		}
 		// serialize mutations per user
 		mu, _ := s.userMu.LoadOrStore(UserFrom(r).Username, &sync.Mutex{})
 		mu.(*sync.Mutex).Lock()
 		defer mu.(*sync.Mutex).Unlock()
 		next(w, r)
-	})
+	}
+}
+
+// originAbsent reports whether the request carries neither Origin nor Referer.
+func originAbsent(r *http.Request) bool {
+	return r.Header.Get("Origin") == "" && r.Header.Get("Referer") == ""
 }
 
 func (s *Server) sameOrigin(r *http.Request) bool {
@@ -274,6 +331,14 @@ func (s *Server) adminOnly(next http.HandlerFunc) http.HandlerFunc {
 		}
 		next(w, r)
 	})
+}
+
+// adminMutating composes the admin role check with the mutating CSRF policy
+// in a single authenticated hop. Admin WRITES need both: adminOnly alone
+// would let a cross-site form post ride an admin's ambient cookie, and
+// authedMutating alone has no role check.
+func (s *Server) adminMutating(next http.HandlerFunc) http.HandlerFunc {
+	return s.adminOnly(s.mutating(next))
 }
 
 type rateBucket struct {

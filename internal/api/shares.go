@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"html/template"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -18,6 +19,11 @@ import (
 )
 
 const shareGrantTTL = 24 * time.Hour
+
+// pubGrantMaxEnts bounds the in-memory share-grant map: inserts beyond the
+// cap evict the soonest-expiring grants, and everything older than
+// shareGrantTTL is swept opportunistically on insert.
+const pubGrantMaxEnts = 1024
 
 // ---- authenticated share management ----
 
@@ -81,13 +87,18 @@ func (s *Server) handleShareCreate(w http.ResponseWriter, r *http.Request) {
 	if req.ExpiresInDays > 0 {
 		expiresAt = time.Now().AddDate(0, 0, req.ExpiresInDays).Unix()
 	}
-	token := newToken(24)
+	token, terr := newToken(24)
+	if terr != nil {
+		writeErr(w, 500, "share error")
+		return
+	}
 	sh, err := s.st.CreateShare(u.ID, logical, token, pwHash, allowDownload, expiresAt)
 	if err != nil {
 		writeErr(w, 500, "share error")
 		return
 	}
 	s.st.AddEvent(u.ID, "share_create", logical)
+	s.invalidateShareIndex()
 	writeJSON(w, 200, map[string]any{
 		"token":         token,
 		"path":          sh.Path,
@@ -108,6 +119,7 @@ func (s *Server) handleShareRevoke(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			s.st.AddEvent(u.ID, "share_revoke", sh.Path)
+			s.invalidateShareIndex()
 			writeJSON(w, 200, map[string]bool{"ok": true})
 			return
 		}
@@ -126,7 +138,10 @@ func (s *Server) shareURLPrefix() string {
 
 // resolveShare maps a path value to a live share. Accepts either a full raw
 // capability token (canonical share URLs) or a 16-char hash prefix (short
-// URLs shown in the management UI).
+// URLs shown in the management UI). Prefix lookups go through an in-memory
+// index so short URLs do not scan every user's shares; the index is rebuilt
+// lazily after any create/revoke and expiry is re-checked per hit, so
+// revoked/expired shares never resolve.
 func (s *Server) resolveShare(v string) (*store.Share, bool) {
 	if v == "" {
 		return nil, false
@@ -137,17 +152,52 @@ func (s *Server) resolveShare(v string) (*store.Share, bool) {
 		}
 	}
 	if len(v) == 16 {
-		all, err := s.allLiveShares()
-		if err != nil {
-			return nil, false
-		}
-		for _, sh := range all {
-			if strings.HasPrefix(sh.TokenHash, v) {
-				return sh, true
-			}
+		if sh, ok := s.shareByPrefix(v); ok {
+			return sh, true
 		}
 	}
 	return nil, false
+}
+
+func (s *Server) shareByPrefix(prefix string) (*store.Share, bool) {
+	s.shareMu.Lock()
+	defer s.shareMu.Unlock()
+	if s.shareIdxStale {
+		idx, err := s.buildShareIndex()
+		if err == nil {
+			s.shareIdx = idx
+			s.shareIdxStale = false
+		}
+		// On rebuild failure keep whatever map we already have rather than
+		// 404 every short URL for the rest of the process.
+	}
+	sh, ok := s.shareIdx[prefix]
+	if !ok {
+		return nil, false
+	}
+	if sh.ExpiresAt != 0 && time.Now().Unix() >= sh.ExpiresAt {
+		return nil, false
+	}
+	return sh, true
+}
+
+func (s *Server) buildShareIndex() (map[string]*store.Share, error) {
+	all, err := s.allLiveShares()
+	if err != nil {
+		return nil, err
+	}
+	idx := make(map[string]*store.Share, len(all))
+	for _, sh := range all {
+		idx[sh.TokenHash[:16]] = sh
+	}
+	return idx, nil
+}
+
+// invalidateShareIndex forces the next prefix lookup to rebuild from the store.
+func (s *Server) invalidateShareIndex() {
+	s.shareMu.Lock()
+	s.shareIdxStale = true
+	s.shareMu.Unlock()
 }
 
 // allLiveShares scans every user's shares; share volume is small on personal instances.
@@ -194,16 +244,74 @@ func (s *Server) issueGrant(w http.ResponseWriter, sh *store.Share) {
 	b := make([]byte, 24)
 	rand.Read(b)
 	grant := hex.EncodeToString(b)
+	now := time.Now()
 	s.pubMu.Lock()
 	if s.pubGr[sh.TokenHash] == nil {
 		s.pubGr[sh.TokenHash] = map[string]int64{}
 	}
-	s.pubGr[sh.TokenHash][grant] = time.Now().Add(shareGrantTTL).Unix()
+	s.pubGr[sh.TokenHash][grant] = now.Add(shareGrantTTL).Unix()
+	s.sweepGrantsLocked(now)
+	s.capGrantsLocked()
 	s.pubMu.Unlock()
 	http.SetCookie(w, &http.Cookie{
 		Name: s.grantCookieName(sh.TokenHash), Value: grant, Path: "/s/",
 		HttpOnly: true, SameSite: http.SameSiteLaxMode, MaxAge: int(shareGrantTTL.Seconds()),
+		Secure: s.secureCookies(),
 	})
+}
+
+// sweepGrantsLocked drops expired grants across every share. Caller holds pubMu.
+func (s *Server) sweepGrantsLocked(now time.Time) {
+	cutoff := now.Unix()
+	for tok, grants := range s.pubGr {
+		for g, exp := range grants {
+			if exp <= cutoff {
+				delete(grants, g)
+			}
+		}
+		if len(grants) == 0 {
+			delete(s.pubGr, tok)
+		}
+	}
+}
+
+// capGrantsLocked bounds total live grants by evicting the soonest-expiring
+// entries first (newest grants — real visitors — survive link scraping).
+// Caller holds pubMu.
+func (s *Server) capGrantsLocked() {
+	total := 0
+	for _, grants := range s.pubGr {
+		total += len(grants)
+	}
+	for total > pubGrantMaxEnts {
+		var (
+			tok, victim string
+			oldest      int64 = math.MaxInt64
+		)
+		for t, grants := range s.pubGr {
+			for g, exp := range grants {
+				if exp < oldest {
+					tok, victim, oldest = t, g, exp
+				}
+			}
+		}
+		if victim == "" {
+			return
+		}
+		delete(s.pubGr[tok], victim)
+		if len(s.pubGr[tok]) == 0 {
+			delete(s.pubGr, tok)
+		}
+		total--
+	}
+}
+
+// SweepShareGrants drops expired public-share grants; safe to call from a
+// background janitor.
+func (s *Server) SweepShareGrants() {
+	s.pubMu.Lock()
+	defer s.pubMu.Unlock()
+	s.sweepGrantsLocked(time.Now())
 }
 
 var pubPageTmpl = template.Must(template.New("pub").Parse(`<!doctype html>
@@ -225,14 +333,19 @@ input{flex:1;background:#161d2c;border:1px solid #2a3348;color:#e8ecf4;border-ra
 img.prev{max-width:100%;border-radius:10px;margin-top:1rem}
 video.prev{max-width:100%;border-radius:10px;margin-top:1rem}
 </style></head><body>
-<header><strong>xx-drive</strong><h1>{{.Title}}</h1>{{if .AllowDownload}}<span style="margin-left:auto"><a class="btn" href="{{.DownloadURL}}">Download{{if .IsDir}} all (.zip){{end}}</a></span>{{end}}</header>
+<header><strong>xx-drive</strong><h1>{{.Title}}</h1>{{if and .AllowDownload (not .NeedPw)}}<span style="margin-left:auto"><a class="btn" href="{{.DownloadURL}}">Download{{if .IsDir}} all (.zip){{end}}</a></span>{{end}}</header>
 <main>
+{{if .NeedPw}}<form method="post" action="{{.FormAction}}">
+{{if .Sub}}<input type="hidden" name="sub" value="{{.Sub}}">{{end}}
+<input type="password" name="password" placeholder="Password" autocomplete="off" autofocus required>
+<button class="btn" type="submit">Unlock</button>
+</form>{{end}}
 {{if .Error}}<p class="err">{{.Error}}</p>{{end}}
-{{if .Entries}}<ul>{{range .Entries}}
+{{if not .NeedPw}}{{if .Entries}}<ul>{{range .Entries}}
 <li><a href="{{.URL}}">{{.Name}}</a><small>{{.SizeLabel}}</small></li>
 {{end}}</ul>{{end}}
 {{if .PreviewImage}}<img class="prev" src="{{.PreviewImage}}" alt="{{.Title}}">
-{{else if .PreviewVideo}}<video class="prev" controls src="{{.PreviewVideo}}"></video>{{end}}
+{{else if .PreviewVideo}}<video class="prev" controls src="{{.PreviewVideo}}"></video>{{end}}{{end}}
 </main></body></html>`))
 
 type pubEntryView struct {
@@ -302,6 +415,17 @@ func (s *Server) renderPubPage(w http.ResponseWriter, r *http.Request, sh *store
 		writeErr(w, 500, "error")
 		return
 	}
+	token := r.PathValue("token")
+	full := sh.Path
+	if sub != "" {
+		full += sub
+	}
+	// Defensive re-check: callers resolve `sub` through shareTarget, but the
+	// render path must never escape the share even if a future caller forgets.
+	if full != sh.Path && !strings.HasPrefix(full, sh.Path+"/") {
+		http.NotFound(w, r)
+		return
+	}
 	data := struct {
 		Title         string
 		Error         string
@@ -311,16 +435,20 @@ func (s *Server) renderPubPage(w http.ResponseWriter, r *http.Request, sh *store
 		DownloadURL   string
 		PreviewImage  string
 		PreviewVideo  string
+		NeedPw        bool
+		FormAction    string
+		Sub           string
 	}{
 		Title: fsdrv.NameOf(sh.Path), AllowDownload: sh.AllowDownload, Error: errMsg,
+		NeedPw: needPw, FormAction: "/s/" + token, Sub: sub,
 	}
 	if data.Title == "" {
 		data.Title = "/"
 	}
-	dl := fmt.Sprintf("/s/%s/download?path=%s", r.PathValue("token"), urlQueryEscape(sub))
+	dl := fmt.Sprintf("/s/%s/download?sub=%s", token, urlQueryEscape(sub))
 	data.DownloadURL = dl
 	if !needPw {
-		e, serr := s.fs.Stat(owner.Username, joinSub(sh.Path, sub))
+		e, serr := s.fs.Stat(owner.Username, full)
 		if serr == nil && !e.IsDir {
 			data.IsDir = false
 			if isImage(e.Name) {
@@ -330,13 +458,13 @@ func (s *Server) renderPubPage(w http.ResponseWriter, r *http.Request, sh *store
 			}
 		} else if serr == nil {
 			data.IsDir = true
-			ents, lerr := s.fs.List(owner.Username, joinSub(sh.Path, sub))
+			ents, lerr := s.fs.List(owner.Username, full)
 			if lerr == nil {
 				for _, en := range ents {
-					u := fmt.Sprintf("/s/%s/list?sub=%s", r.PathValue("token"), urlQueryEscape(en.Path))
-					if !en.IsDir {
-						u = fmt.Sprintf("/s/%s/download?path=%s&inline=1", r.PathValue("token"), urlQueryEscape(en.Path))
-					}
+					// Both files and folders link to the HTML page; the page
+					// renders previews + Download for files and a listing for
+					// directories. `sub` stays relative to the share root.
+					u := fmt.Sprintf("/s/%s?sub=%s", token, urlQueryEscape(strings.TrimPrefix(en.Path, sh.Path)))
 					lbl := sizeLabel(en.Size)
 					if en.IsDir {
 						lbl = "folder"
@@ -352,36 +480,91 @@ func (s *Server) renderPubPage(w http.ResponseWriter, r *http.Request, sh *store
 
 func urlQueryEscape(s string) string { return url.QueryEscape(s) }
 
-func joinSub(root, sub string) string {
-	sub = mustValidate(sub)
-	if sub == "/" {
-		return root
+// shareTarget resolves what a visitor asked for within a share. Accepts BOTH
+// `path` (full logical path) and `sub` (relative to the share root); returns
+// the resolved logical path plus the share-relative sub path. ok=false unless
+// the target sits AT or UNDER the share root — the mandatory containment check
+// that keeps ?path=/otheruser/x and ?sub=../../x out of the share.
+func shareTarget(sh *store.Share, rawPath, rawSub string) (full, sub string, ok bool) {
+	switch {
+	case rawPath != "":
+		if hasDotDotSegment(rawPath) {
+			return "", "", false
+		}
+		v, err := fsdrv.ValidateRel(rawPath)
+		if err != nil {
+			return "", "", false
+		}
+		full, sub = v, strings.TrimPrefix(v, sh.Path)
+	case rawSub != "":
+		if hasDotDotSegment(rawSub) {
+			return "", "", false
+		}
+		v, err := fsdrv.ValidateRel(rawSub)
+		if err != nil {
+			return "", "", false
+		}
+		switch {
+		case v == "/":
+			full = sh.Path
+		case v == sh.Path || strings.HasPrefix(v, sh.Path+"/"):
+			// Absolute sub that already includes the share root (old clients
+			// emit the full logical path): use as-is instead of doubling the
+			// prefix (/photos + /photos/vacation).
+			full, sub = v, strings.TrimPrefix(v, sh.Path)
+		default:
+			full, sub = sh.Path+v, v
+		}
+	default:
+		return sh.Path, "", true
 	}
-	return root + sub
+	if full != sh.Path && !strings.HasPrefix(full, sh.Path+"/") {
+		return "", "", false
+	}
+	return full, sub, true
+}
+
+// hasDotDotSegment rejects literal ".." traversal before ValidateRel's Clean
+// would silently fold it into an in-share path.
+func hasDotDotSegment(p string) bool {
+	for _, seg := range strings.Split(p, "/") {
+		if seg == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) handlePublicPage(w http.ResponseWriter, r *http.Request) {
-	sh, blocked := s.guardSharePage(w, r)
+	q := r.URL.Query()
+	sh := s.guardSharePage(w, r)
 	if sh == nil {
 		return
 	}
-	sub := r.URL.Query().Get("sub")
+	_, sub, ok := shareTarget(sh, q.Get("path"), q.Get("sub"))
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
 	s.renderPubPage(w, r, sh, sub, false, "")
-	_ = blocked
 }
 
 // guardSharePage renders the password form when needed instead of JSON errors.
-func (s *Server) guardSharePage(w http.ResponseWriter, r *http.Request) (*store.Share, bool) {
+func (s *Server) guardSharePage(w http.ResponseWriter, r *http.Request) *store.Share {
 	sh, ok := s.resolveShare(r.PathValue("token"))
 	if !ok {
 		http.NotFound(w, r)
-		return nil, false
+		return nil
 	}
 	if sh.HasPassword && !s.hasGrant(r, sh) {
-		s.renderPubPage(w, r, sh, "", true, "")
-		return nil, false
+		_, sub, valid := shareTarget(sh, r.URL.Query().Get("path"), r.URL.Query().Get("sub"))
+		if !valid {
+			sub = ""
+		}
+		s.renderPubPage(w, r, sh, sub, true, "")
+		return nil
 	}
-	return sh, true
+	return sh
 }
 
 func (s *Server) handlePublicPassword(w http.ResponseWriter, r *http.Request) {
@@ -390,16 +573,36 @@ func (s *Server) handlePublicPassword(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	// Throttle password guesses per client IP + share. Every guess burns a
+	// full PBKDF2 verification unauthenticated; without the bucket an online
+	// brute force doubles as a CPU-exhaustion vector. Same limits as login
+	// (10 failures / 15 min), 429 when exhausted.
+	key := clientIP(r) + "|" + sh.TokenHash
+	if !s.loginAllowed(key) {
+		writeErr(w, http.StatusTooManyRequests, "too many attempts; try later")
+		return
+	}
 	if err := r.ParseForm(); err != nil {
 		writeErr(w, 400, "bad form")
 		return
 	}
 	if s.st.CheckSharePassword(sh, r.PostFormValue("password")) {
 		s.issueGrant(w, sh)
-		http.Redirect(w, r, "/s/"+r.PathValue("token"), http.StatusSeeOther)
+		target := "/s/" + r.PathValue("token")
+		if _, sub, ok := shareTarget(sh, "", r.PostFormValue("sub")); ok && sub != "" {
+			target += "?sub=" + urlQueryEscape(sub)
+		}
+		http.Redirect(w, r, target, http.StatusSeeOther)
 		return
 	}
-	s.renderPubPage(w, r, sh, "", true, "Wrong password")
+	s.loginFailed(key)
+	// Wrong-password re-render must keep ?sub= context (the hidden form field
+	// already carries it through the success path); containment is re-checked.
+	errSub := ""
+	if _, sub, ok := shareTarget(sh, "", r.PostFormValue("sub")); ok {
+		errSub = sub
+	}
+	s.renderPubPage(w, r, sh, errSub, true, "Wrong password")
 }
 
 func (s *Server) handlePublicList(w http.ResponseWriter, r *http.Request) {
@@ -412,7 +615,12 @@ func (s *Server) handlePublicList(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "error")
 		return
 	}
-	full := joinSub(sh.Path, r.URL.Query().Get("sub"))
+	q := r.URL.Query()
+	full, _, ok := shareTarget(sh, q.Get("path"), q.Get("sub"))
+	if !ok {
+		writeErr(w, http.StatusNotFound, "not part of this share")
+		return
+	}
 	e, err := s.fs.Stat(owner.Username, full)
 	if err != nil {
 		mapFsErr(w, err)
@@ -441,17 +649,12 @@ func (s *Server) handlePublicDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	sub := q.Get("sub")
-	full := joinSub(sh.Path, sub)
-	inline := q.Get("inline") == "1"
-
-	// view-only shares: only inline previews allowed
-	if inline && !sh.AllowDownload {
-		// allowed: preview streaming
-	} else if !sh.AllowDownload {
-		writeErr(w, http.StatusForbidden, "downloads disabled by owner")
+	full, _, ok := shareTarget(sh, q.Get("path"), q.Get("sub"))
+	if !ok {
+		writeErr(w, http.StatusNotFound, "not part of this share")
 		return
 	}
+	inline := q.Get("inline") == "1"
 
 	name := fsdrv.NameOf(full)
 	if name == "" {
@@ -463,11 +666,17 @@ func (s *Server) handlePublicDownload(w http.ResponseWriter, r *http.Request) {
 		mapFsErr(w, err)
 		return
 	}
-	if e.IsDir {
-		if !sh.AllowDownload {
+	// view-only shares: inline previews only for a small image/video
+	// allowlist; everything else — including whole-folder zips and
+	// &inline=1 on documents/archives — is refused.
+	if !sh.AllowDownload {
+		previewable := inline && (isImage(name) || isVideo(name))
+		if !previewable {
 			writeErr(w, http.StatusForbidden, "downloads disabled by owner")
 			return
 		}
+	}
+	if e.IsDir {
 		// zip the shared subtree
 		s.zipShared(w, r, owner.Username, full, name)
 		return
@@ -494,15 +703,17 @@ func (s *Server) zipShared(w http.ResponseWriter, r *http.Request, username, roo
 		}
 		hdr := &zip.FileHeader{Name: rel, Method: zip.Deflate, Modified: time.Unix(e.ModTime, 0)}
 		hdr.SetMode(0o644)
+		// Open (Lstat-guarded) BEFORE writing the header so planted symlinks,
+		// specials and unreadable files are excluded from the archive entirely.
+		f, _, ferr := fsdrv.OpenRegular(abs)
+		if ferr != nil {
+			return nil // skip silently; one bad entry must not fail the zip
+		}
+		defer f.Close()
 		fw, err := zw.CreateHeader(hdr)
 		if err != nil {
 			return err
 		}
-		f, err := os.Open(abs)
-		if err != nil {
-			return nil // skip unreadable
-		}
-		defer f.Close()
 		_, err = io.Copy(fw, f)
 		return err
 	})

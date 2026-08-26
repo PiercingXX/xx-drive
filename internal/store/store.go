@@ -16,6 +16,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -30,7 +31,13 @@ const pwIterations = 600000
 
 func HashPassword(password string) []byte {
 	salt := make([]byte, 16)
-	rand.Read(salt)
+	// crypto/rand failing means the OS entropy source is broken. The signature
+	// cannot return an error without breaking callers in other packages, and
+	// silently proceeding with a predictable salt would weaken every stored
+	// password hash — so fail loudly and deliberately instead.
+	if _, err := rand.Read(salt); err != nil {
+		panic(fmt.Sprintf("xxdrive/store: crypto/rand failed generating password salt: %v", err))
+	}
 	dk := pbkdf2.Key([]byte(password), salt, pwIterations, 32, sha256.New)
 	return []byte(fmt.Sprintf("pbkdf2-sha256$%d$%s$%s", pwIterations, hex.EncodeToString(salt), hex.EncodeToString(dk)))
 }
@@ -215,8 +222,32 @@ func HashToken(raw string) string {
 
 // ---- users ----
 
+// validSegmentName reports whether name is safe to use as a single filesystem
+// path segment under files/<name>: non-empty, within maxLen, free of path
+// separators and NUL, not "." or "..", and in canonical form (filepath.Clean
+// must not rewrite it). This is the single choke point guarding per-user
+// storage isolation; every username and fabric id must pass through it before
+// it can ever become a directory name on disk.
+func validSegmentName(name string, maxLen int) bool {
+	if name == "" || len(name) > maxLen {
+		return false
+	}
+	if strings.ContainsAny(name, "/\\\x00") {
+		return false
+	}
+	if name == "." || name == ".." {
+		return false
+	}
+	return filepath.Clean(name) == name
+}
+
+// validUsername enforces the local-username rules (1-64 chars, one clean
+// segment). Both admin creation and first-boot bootstrap go through CreateUser,
+// so this covers every path a username can enter the system.
+func validUsername(name string) bool { return validSegmentName(name, 64) }
+
 func (s *Store) CreateUser(username string, passwordHash []byte, isAdmin bool) (*User, error) {
-	if username == "" || strings.ContainsAny(username, "/\\\x00") || len(username) > 64 {
+	if !validUsername(username) {
 		return nil, fmt.Errorf("%w: invalid username", ErrNotFound)
 	}
 	res, err := s.db.Exec(`INSERT INTO users (username, password_hash, is_admin, created_at) VALUES (?,?,?,?)`,
@@ -255,7 +286,10 @@ func fabricShadowUsername(fabricID string) string { return "fabric_" + fabricID 
 // via the local password path; the only way to become this user is to present a
 // valid fabric token for the same user_id.
 func (s *Store) GetOrCreateFabricUser(fabricID string) (*User, error) {
-	if fabricID == "" || strings.ContainsAny(fabricID, "/\\\x00") || len(fabricID) > 200 {
+	// Validate BEFORE prefixing: the shadow username "fabric_"+id becomes a
+	// directory name under files/, so the raw id must itself be one clean
+	// path segment.
+	if !validSegmentName(fabricID, 200) {
 		return nil, fmt.Errorf("%w: invalid fabric id", ErrNotFound)
 	}
 	if u, err := s.UserByFabricID(fabricID); err == nil {
@@ -344,6 +378,29 @@ func (s *Store) CountUsers() (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&n)
 	return n, err
+}
+
+// DeleteUser removes the user row. Sessions/shares/stars/events/versions
+// cascade; etag_cache has no FK so it is deleted explicitly. Caller must
+// already have removed on-disk files for this username.
+func (s *Store) DeleteUser(userID int64) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM etag_cache WHERE user_id = ?`, userID); err != nil {
+		return err
+	}
+	res, err := tx.Exec(`DELETE FROM users WHERE id = ?`, userID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return tx.Commit()
 }
 
 func (s *Store) SetPassword(userID int64, hash []byte) error {
@@ -599,8 +656,203 @@ func (s *Store) GetVersion(userID int64, path, versionID string) (*VersionInfo, 
 	return &v, err
 }
 
+// DeleteVersionsForPath drops version rows for exactly one path.
+// Prefer DeleteVersionsUnder when a subtree (directory) is being purged.
 func (s *Store) DeleteVersionsForPath(userID int64, path string) {
 	_, _ = s.db.Exec(`DELETE FROM versions WHERE user_id = ? AND path = ?`, userID, path)
+}
+
+// RelocateVersions rewrites version-index rows after a file or directory
+// moved from oldPath to newPath (every descendant of oldPath included).
+// It returns the distinct OLD logical paths that had rows, so the caller can
+// rename the matching on-disk blob directories under
+// versions/<user>/<pathHash(logical)> in lockstep. Rows are updated in one
+// transaction; a path with no rows relocates nothing and is not an error.
+func (s *Store) RelocateVersions(userID int64, oldPath, newPath string) ([]string, error) {
+	if oldPath == "" || oldPath == "/" || newPath == "" || newPath == "/" {
+		return nil, nil
+	}
+	var moved []string
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.Query(
+		`SELECT DISTINCT path FROM versions WHERE user_id = ? AND (path = ? OR path LIKE ? ESCAPE '\')`,
+		userID, oldPath, EscapeLike(oldPath)+"/%")
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		moved = append(moved, p)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	if len(moved) > 0 {
+		// substr/length both operate on characters inside SQLite, so the
+		// suffix rewrite is UTF-8-safe regardless of byte lengths.
+		if _, err := tx.Exec(
+			`UPDATE versions SET path = ? || substr(path, length(?)+1)
+			 WHERE user_id = ? AND (path = ? OR path LIKE ? ESCAPE '\')`,
+			newPath, oldPath, userID, oldPath, EscapeLike(oldPath)+"/%"); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return moved, nil
+}
+
+// VersionRef identifies one version-index row (path + random version id).
+type VersionRef struct {
+	Path      string
+	VersionID string
+}
+
+// VersionsUnder lists the version rows for root and everything below it, so a
+// caller can snapshot EXACTLY which rows belong to an item before an
+// operation that might otherwise mix them with newer rows sharing the path.
+func (s *Store) VersionsUnder(userID int64, root string) ([]VersionRef, error) {
+	rows, err := s.db.Query(
+		`SELECT path, version_id FROM versions WHERE user_id = ? AND (path = ? OR path LIKE ? ESCAPE '\') ORDER BY id`,
+		userID, root, EscapeLike(root)+"/%")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []VersionRef
+	for rows.Next() {
+		var ref VersionRef
+		if err := rows.Scan(&ref.Path, &ref.VersionID); err != nil {
+			return nil, err
+		}
+		out = append(out, ref)
+	}
+	return out, rows.Err()
+}
+
+// MoveSpecificVersions atomically relocates exactly the listed version rows:
+// each is deleted from its recorded path under oldRoot and re-inserted with
+// identical size/created_at at the equivalent spot under newRoot. Rows NOT in
+// the list — e.g. history a newer file accumulated at the same paths — are
+// untouched; listed-but-missing rows are skipped. This is what keeps two
+// files' histories separate when an older trash item restores beside its
+// successor instead of merging every row under one path.
+func (s *Store) MoveSpecificVersions(userID int64, refs []VersionRef, oldRoot, newRoot string) error {
+	if len(refs) == 0 || oldRoot == "" || oldRoot == "/" || newRoot == "" || newRoot == "/" {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, ref := range refs {
+		if !strings.HasPrefix(ref.Path, oldRoot) {
+			continue // outside the claimed subtree: never touch it
+		}
+		np := newRoot + strings.TrimPrefix(ref.Path, oldRoot)
+		res, err := tx.Exec(`INSERT INTO versions (user_id, path, version_id, size, created_at)
+			SELECT user_id, ?, version_id, size, created_at FROM versions
+			WHERE user_id = ? AND path = ? AND version_id = ?`,
+			np, userID, ref.Path, ref.VersionID)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			continue // already gone
+		}
+		if _, err := tx.Exec(`DELETE FROM versions WHERE user_id = ? AND path = ? AND version_id = ?`,
+			userID, ref.Path, ref.VersionID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// DeleteSpecificVersions permanently drops exactly the given version rows
+// (path + version id pairs) and returns the distinct paths that lost rows so
+// the caller can remove the matching blob files. Used by permanent-purge
+// sites when the trash metadata records which versions an item owned — a
+// NEWER file recreated at the same logical path keeps its own history.
+func (s *Store) DeleteSpecificVersions(userID int64, refs []VersionRef) ([]string, error) {
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	seen := map[string]bool{}
+	var removed []string
+	for _, ref := range refs {
+		res, err := tx.Exec(`DELETE FROM versions WHERE user_id = ? AND path = ? AND version_id = ?`,
+			userID, ref.Path, ref.VersionID)
+		if err != nil {
+			return nil, err
+		}
+		if n, _ := res.RowsAffected(); n > 0 && !seen[ref.Path] {
+			seen[ref.Path] = true
+			removed = append(removed, ref.Path)
+		}
+	}
+	return removed, tx.Commit()
+}
+
+// DeleteVersionsUnder permanently drops version rows for path and everything
+// below it. It returns the distinct paths removed so the caller can delete
+// the matching blob directories (permanent-purge sites only — trashing a
+// file must KEEP its history).
+func (s *Store) DeleteVersionsUnder(userID int64, prefix string) ([]string, error) {
+	if prefix == "" || prefix == "/" {
+		return nil, fmt.Errorf("refusing to delete all versions for user %d", userID)
+	}
+	var removed []string
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.Query(
+		`SELECT DISTINCT path FROM versions WHERE user_id = ? AND (path = ? OR path LIKE ? ESCAPE '\')`,
+		userID, prefix, EscapeLike(prefix)+"/%")
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		removed = append(removed, p)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	if len(removed) > 0 {
+		if _, err := tx.Exec(`DELETE FROM versions WHERE user_id = ? AND (path = ? OR path LIKE ? ESCAPE '\')`,
+			userID, prefix, EscapeLike(prefix)+"/%"); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return removed, nil
 }
 
 // PruneVersions keeps at most keep newest versions per (user,path).

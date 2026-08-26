@@ -59,7 +59,7 @@ func newFabricEnv(t *testing.T) *testEnv {
 		ts.Close()
 		st.Close()
 	})
-	return &testEnv{t: t, st: st, fs: fsd, srv: ts, client: ts.Client(), baseURL: ts.URL}
+	return &testEnv{t: t, st: st, fs: fsd, srvr: ts, client: ts.Client(), baseURL: ts.URL}
 }
 
 // TestFabricTokenAuthenticatesAndMapsToUserID: a token minted in the documented

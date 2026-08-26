@@ -70,6 +70,13 @@ class ThemeSyncReceiver(
         /** The xx-launcher's theme-change broadcast action. */
         const val ACTION_THEME_CHANGED = "xx.launcher.THEME_CHANGED"
 
+        /**
+         * Custom signature-level permission gating sends to this receiver —
+         * declared in AndroidManifest.xml and required on the receiver there;
+         * only apps signed with our cert (the xx-launcher) can hold it.
+         */
+        const val PERMISSION_THEME_SYNC = "com.piercingxx.xxdrive.permission.THEME_SYNC"
+
         /** String extra: the active theme's display name (or "Custom"). */
         const val EXTRA_THEME_NAME = "xx.launcher.extra.THEME_NAME"
 

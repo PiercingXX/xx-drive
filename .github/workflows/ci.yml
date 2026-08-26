@@ -1,0 +1,59 @@
+# CI for xx-drive. Branch protection can require the checks named
+#   "go"  and  "android"
+# to pass before merge; both jobs must be green on every push/PR to main.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: go
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Version comes from go.mod (currently 1.25.0).
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: gofmt (fail if any file needs formatting)
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test -count=1 ./...
+
+  android:
+    name: android
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Ubuntu runners ship a preinstalled Android SDK; setup-android makes
+      # sure ANDROID_HOME / sdkmanager are ready for the Gradle plugin.
+      - uses: android-actions/setup-android@v3
+
+      - name: Gradle unit tests
+        run: ./gradlew testDebugUnitTest
+        working-directory: android

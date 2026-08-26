@@ -18,8 +18,10 @@ import java.util.Locale
 
 /**
  * Camera auto-backup: uploads new MediaStore images to /Camera Uploads/<date>/
- * using the server's conflict-safe upload endpoint. The last-sync timestamp is
- * advanced only after a batch completes, so failures retry on the next run.
+ * using the server's conflict-safe upload endpoint. The last-sync watermark
+ * advances only through the all-successful prefix of the batch, so a failure
+ * stops it: the failed photo and everything after it are re-queried (and
+ * retried) on the next run.
  */
 class PhotoUploadWorker(appContext: Context, params: WorkerParameters) :
     CoroutineWorker(appContext, params) {
@@ -33,6 +35,9 @@ class PhotoUploadWorker(appContext: Context, params: WorkerParameters) :
     private val http = OkHttpClient()
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
+        // WorkManager may spin us up with no Activity alive (process death);
+        // Session.init normally ran in XxDriveApp, but be defensive — it's idempotent.
+        Session.init(applicationContext)
         if (!Session.isLoggedIn) return@withContext Result.success()
         val prefs = applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val since = prefs.getLong(KEY_LAST_TS, System.currentTimeMillis() - 24 * 3600_000L)
@@ -40,7 +45,7 @@ class PhotoUploadWorker(appContext: Context, params: WorkerParameters) :
         val images = queryNewImages(since)
         if (images.isEmpty()) return@withContext Result.success()
 
-        var anySuccess = false
+        val attempts = mutableListOf<PhotoBackup.Attempt>()
         val dayFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
         for (item in images) {
             try {
@@ -48,14 +53,17 @@ class PhotoUploadWorker(appContext: Context, params: WorkerParameters) :
                 // Server creates parent folders automatically; conflict=rename never overwrites.
                 val target = "/Camera Uploads/$day/${item.name}"
                 uploadFile(item.path, target)
-                anySuccess = true
+                attempts.add(PhotoBackup.Attempt(item.dateTaken, uploaded = true))
             } catch (e: Exception) {
-                // Keep going through the batch; failed files stay "new" because the
-                // timestamp only advances when at least one file succeeded.
+                // Keep going through the batch. The watermark stops at the first
+                // failure, so this file (and everything after it) stays above it
+                // and the next run re-queries and retries it.
+                attempts.add(PhotoBackup.Attempt(item.dateTaken, uploaded = false))
             }
         }
-        if (anySuccess) {
-            prefs.edit().putLong(KEY_LAST_TS, System.currentTimeMillis()).apply()
+        val next = PhotoBackup.nextWatermark(since, attempts)
+        if (next != since) {
+            prefs.edit().putLong(KEY_LAST_TS, next).apply()
         }
         Result.success()
     }

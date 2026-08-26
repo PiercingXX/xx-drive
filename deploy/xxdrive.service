@@ -8,6 +8,8 @@ Type=simple
 User=xxdrive
 Group=xxdrive
 StateDirectory=xxdrive
+# Optional env file (e.g. XXD_ADMIN_PASSWORD for first boot); missing file is fine.
+EnvironmentFile=-/etc/default/xxdrive
 ExecStart=/usr/local/bin/xxdrive-server -addr 127.0.0.1:8080 -data /var/lib/xxdrive -base-url https://CHANGE-ME.example.com
 Restart=on-failure
 RestartSec=5

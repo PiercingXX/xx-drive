@@ -6,14 +6,26 @@
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
 
+    <!-- Only apps signed with OUR certificate (the xx-launcher) can hold this
+         permission, so arbitrary apps can no longer broadcast-recolor the
+         chrome. The launcher adds <uses-permission> for it; the signature
+         check grants it at install time. -->
+    <permission
+        android:name="com.piercingxx.xxdrive.permission.THEME_SYNC"
+        android:protectionLevel="signature" />
+
     <application
+        android:name=".XxDriveApp"
         android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:theme="@style/Theme.XXDrive"
-        android:usesCleartextTraffic="true">
-        <!-- usesCleartextTraffic: allows plain-HTTP LAN testing (http://192.168.x.x).
-             REMOVE THIS for production behind HTTPS. -->
+        android:networkSecurityConfig="@xml/network_security_config">
+        <!-- Cleartext policy lives in @xml/network_security_config: the DEBUG
+             build type overrides that whole file to permit plain HTTP (the
+             server address is user-entered LAN http://192.168.x.x, and NSC
+             cannot wildcard IP ranges), while this main variant — used by
+             every non-debug build — denies cleartext outright. -->
 
         <activity android:name=".LoginActivity" android:exported="true">
             <intent-filter>
@@ -27,10 +39,13 @@
 
         <!-- Family-wide theme sync: the xx-launcher targets this package
              explicitly (required since Android O for manifest receivers)
-             with its active-theme broadcast. -->
+             with its active-theme broadcast. exported=true is required for a
+             different app to deliver it; android:permission gates senders to
+             holders of our signature-level THEME_SYNC permission. -->
         <receiver
             android:name=".theme.ThemeSyncReceiver"
-            android:exported="true">
+            android:exported="true"
+            android:permission="com.piercingxx.xxdrive.permission.THEME_SYNC">
             <intent-filter>
                 <action android:name="xx.launcher.THEME_CHANGED" />
             </intent-filter>

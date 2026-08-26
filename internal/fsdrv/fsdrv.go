@@ -22,14 +22,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
-
-func crandRead(b []byte) (int, error) { return rand.Read(b) }
 
 var (
 	ErrNotFound = errors.New("not found")
@@ -41,6 +41,16 @@ var (
 )
 
 const versionKeep = 32
+
+// VersionBlobMu serializes version-blob REMOVAL against in-process OPEN of the
+// same blobs (janitor/prune vs concurrent restore/download). Readers
+// (OpenVersion) hold the read side only across path-resolve+open; every
+// removal site — pruned-blob delete, version-dir delete, version-dir relocate
+// — holds the write side. Once a blob is successfully open, its file
+// descriptor stays readable even if the file is unlinked afterwards, so
+// streaming needs no lock. This is a pragmatic single-process mitigation:
+// cross-process locking on a shared data dir remains unsupported.
+var VersionBlobMu sync.RWMutex
 
 // VersionInfo describes a snapshotted prior version of a file.
 type VersionInfo struct {
@@ -74,6 +84,27 @@ func New(root string) (*Driver, error) {
 }
 
 func (d *Driver) Root() string { return d.root }
+
+// RemoveUser deletes files/, trash/, and versions/ for a single user. The
+// username must be a clean path segment (same rules as CreateUser) so this
+// can never RemoveAll a parent of the data root.
+func (d *Driver) RemoveUser(username string) error {
+	if username == "" || username == "." || username == ".." ||
+		strings.ContainsAny(username, "/\\\x00") || filepath.Clean(username) != username {
+		return ErrInvalid
+	}
+	for _, sub := range []string{"files", "trash", "versions"} {
+		p := filepath.Join(d.root, sub, username)
+		want := d.root + string(os.PathSeparator) + sub + string(os.PathSeparator) + username
+		if p != want {
+			return ErrInvalid
+		}
+		if err := os.RemoveAll(p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // ---- path safety choke point ----
 
@@ -129,10 +160,17 @@ func (d *Driver) ResolveUserPath(username, rel string) (abs string, logical stri
 	if err != nil {
 		return "", "", err
 	}
+	// Containment is asserted against the PRE-CLEAN per-user directory: a
+	// hostile username ("..", "a/../b", "…/") would be silently rewritten by
+	// filepath.Join below and could then satisfy a post-clean containment
+	// check while actually pointing outside files/. Comparing against the
+	// literal uncleaned prefix rejects such names outright (defense in depth;
+	// store.CreateUser already refuses them).
+	expectedUserRoot := d.root + string(os.PathSeparator) + "files" + string(os.PathSeparator) + username
 	userRoot := filepath.Join(d.root, "files", username)
 	abs = filepath.Join(userRoot, filepath.FromSlash(logical))
 	// Containment check on the lexical path.
-	if abs != userRoot && !strings.HasPrefix(abs, userRoot+string(os.PathSeparator)) {
+	if abs != expectedUserRoot && !strings.HasPrefix(abs, expectedUserRoot+string(os.PathSeparator)) {
 		return "", "", ErrInvalid
 	}
 	// Walk components from the user root down, rejecting symlinks.
@@ -225,6 +263,13 @@ type Entry struct {
 	Starred bool   `json:"starred,omitempty"`
 }
 
+// isStagingEntry reports whether name belongs to a client sync-staging file
+// that must never surface as user content: the CLI stages downloads as
+// "<name>.xxpart" and uploads historically use the ".xxpartial" prefix.
+func isStagingEntry(name string) bool {
+	return strings.HasPrefix(name, ".xxpartial") || strings.HasSuffix(name, ".xxpart")
+}
+
 // ---- operations ----
 
 func (d *Driver) Stat(username, rel string) (*Entry, error) {
@@ -251,7 +296,7 @@ func (d *Driver) List(username, rel string) ([]*Entry, error) {
 	out := make([]*Entry, 0, len(fis))
 	for _, fi := range fis {
 		name := fi.Name()
-		if strings.HasPrefix(name, ".xxpartial") {
+		if isStagingEntry(name) {
 			continue
 		}
 		info, err := fi.Info()
@@ -370,6 +415,26 @@ func (d *Driver) Upload(username, rel string, r io.Reader, maxSize int64, ifMatc
 			np, jerr := JoinPath(ParentOf(logical), fmt.Sprintf("%s (conflict from %s %s)%s", stem, sanitizeTag(tag), stamp, ext))
 			if jerr != nil {
 				return "", nil, false, prev, jerr
+			}
+			// os.Rename atomically REPLACES its destination, so a synthesized
+			// name that collides with an earlier conflict copy would silently
+			// destroy it. Two uploads with the same basename+deviceTag inside
+			// one second synthesize identical names; probe with Lstat and
+			// disambiguate with an incrementing counter until free.
+			for i := 2; ; i++ {
+				probe, _, perr := d.ResolveUserPath(username, np)
+				if perr != nil {
+					return "", nil, false, prev, perr
+				}
+				_, lerr := os.Lstat(probe)
+				if errors.Is(lerr, os.ErrNotExist) {
+					break // free
+				}
+				if lerr != nil {
+					return "", nil, false, prev, lerr
+				}
+				cext := filepath.Ext(np)
+				np = strings.TrimSuffix(np, cext) + fmt.Sprintf(" (%d)", i) + cext
 			}
 			nabs, nlog, jerr := d.ResolveUserPath(username, np)
 			if jerr != nil {
@@ -549,7 +614,29 @@ func (d *Driver) Copy(username, from, destDir string, renameTo string) (*Entry, 
 }
 
 // Delete moves a subtree into the trash. Returns a trash ID.
+//
+// Atomicity protocol (chosen design: metadata-first sidecar):
+//
+//  1. write metadata to trash/<user>/<id>.json.tmp   (sidecar, not yet live)
+//  2. rename the payload into place                  trash/<user>/<id>
+//  3. atomically publish the metadata                .json.tmp -> <id>.json
+//
+// ListTrash and the janitor only ever consult published <id>.json files, so
+// an interrupted Delete leaves at most an unreferenced payload plus a .tmp
+// sidecar — never a vanished original. Every failure path rolls back (payload
+// renamed home, temporaries removed) so the original file is never lost while
+// the operation reports failure. Only a double fault — the rollback rename
+// itself failing, e.g. because something re-created the source path — can
+// strand the payload inside the trash without metadata.
 func (d *Driver) Delete(username, rel string) (id string, origPath string, err error) {
+	return d.DeleteWithVersions(username, rel, nil)
+}
+
+// DeleteWithVersions moves a subtree into the trash, recording versionIds
+// (the version-index rows owned by the item at delete time) in the metadata
+// sidecar. A later restore onto a reused path can then move exactly this
+// history and leave any newer occupant's rows alone.
+func (d *Driver) DeleteWithVersions(username, rel string, versions []TrashVersionRef) (id string, origPath string, err error) {
 	abs, logical, err := d.ResolveUserPath(username, rel)
 	if err != nil {
 		return "", "", err
@@ -561,21 +648,39 @@ func (d *Driver) Delete(username, rel string) (id string, origPath string, err e
 	if err != nil {
 		return "", "", mapStatErr(err)
 	}
-	id = newID()
-	trashItem := filepath.Join(d.root, "trash", username, id)
-	if err := os.MkdirAll(filepath.Join(d.root, "trash", username), 0o700); err != nil {
+	id, err = newID()
+	if err != nil {
 		return "", "", err
 	}
-	if err := os.Rename(abs, trashItem); err != nil {
-		return "", "", mapStatErr(err)
+	trashUserDir := filepath.Join(d.root, "trash", username)
+	if err := os.MkdirAll(trashUserDir, 0o700); err != nil {
+		return "", "", err
 	}
 	meta, _ := json.Marshal(map[string]any{
 		"origPath":  logical,
 		"name":      NameOf(logical),
 		"isDir":     fi.IsDir(),
 		"deletedAt": time.Now().Unix(),
+		"versions":  versions,
 	})
-	if err := os.WriteFile(trashItem+".json", meta, 0o600); err != nil {
+	// Step 1: metadata first — if this fails the payload never moved.
+	sidecar := filepath.Join(trashUserDir, id+".json.tmp")
+	if err := os.WriteFile(sidecar, meta, 0o600); err != nil {
+		os.Remove(sidecar)
+		return "", "", err
+	}
+	// Step 2: move the payload.
+	trashItem := filepath.Join(trashUserDir, id)
+	if err := os.Rename(abs, trashItem); err != nil {
+		os.Remove(sidecar)
+		return "", "", mapStatErr(err)
+	}
+	// Step 3: publish atomically; roll back on failure.
+	if err := os.Rename(sidecar, trashItem+".json"); err != nil {
+		os.Remove(sidecar)
+		if rbErr := os.Rename(trashItem, abs); rbErr != nil {
+			return "", "", fmt.Errorf("trash: finalize failed (%v) and rollback failed (%v); payload left at %s", err, rbErr, trashItem)
+		}
 		return "", "", err
 	}
 	return id, logical, nil
@@ -588,6 +693,19 @@ type TrashItem struct {
 	IsDir     bool   `json:"isDir"`
 	Size      int64  `json:"size"`
 	DeletedAt int64  `json:"deletedAt"`
+	// Versions records exactly which version-index rows belonged to the item
+	// when it was trashed (path + version id). A NEW file later recreated at
+	// OrigPath accumulates its own rows at the same key; without this record
+	// a restore cannot tell the two histories apart. Empty for trash items
+	// written before this field existed.
+	Versions []TrashVersionRef `json:"versions,omitempty"`
+}
+
+// TrashVersionRef pins one version-index row to its logical path at
+// delete time (subtree rows included for trashed directories).
+type TrashVersionRef struct {
+	Path      string `json:"path"`
+	VersionID string `json:"versionId"`
 }
 
 func (d *Driver) ListTrash(username string) ([]*TrashItem, error) {
@@ -608,20 +726,15 @@ func (d *Driver) ListTrash(username string) ([]*TrashItem, error) {
 		if err != nil {
 			continue
 		}
-		var m struct {
-			OrigPath  string `json:"origPath"`
-			Name      string `json:"name"`
-			IsDir     bool   `json:"isDir"`
-			DeletedAt int64  `json:"deletedAt"`
-		}
+		var m TrashItem
 		if json.Unmarshal(raw, &m) != nil {
 			continue
 		}
-		item := &TrashItem{ID: strings.TrimSuffix(ent.Name(), ".json"), Name: m.Name, OrigPath: m.OrigPath, IsDir: m.IsDir, DeletedAt: m.DeletedAt}
-		if fi, err := os.Stat(filepath.Join(dir, item.ID)); err == nil && !item.IsDir {
-			item.Size = fi.Size()
+		m.ID = strings.TrimSuffix(ent.Name(), ".json")
+		if fi, err := os.Stat(filepath.Join(dir, m.ID)); err == nil && !m.IsDir {
+			m.Size = fi.Size()
 		}
-		out = append(out, item)
+		out = append(out, &m)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].DeletedAt > out[j].DeletedAt })
 	return out, nil
@@ -666,6 +779,31 @@ func (d *Driver) Restore(username, trashID string) (string, error) {
 	}
 }
 
+// ReadTrashMeta loads one trash item's metadata without touching the payload.
+// The API layer reads it BEFORE Restore/PurgeTrashItem consume the .json
+// sidecar, so version history can follow (or be dropped for) OrigPath.
+func (d *Driver) ReadTrashMeta(username, trashID string) (*TrashItem, error) {
+	if !validID(trashID) {
+		return nil, ErrInvalid
+	}
+	raw, err := os.ReadFile(filepath.Join(d.root, "trash", username, trashID+".json"))
+	if err != nil {
+		return nil, mapStatErr(err)
+	}
+	var m struct {
+		OrigPath  string            `json:"origPath"`
+		Name      string            `json:"name"`
+		IsDir     bool              `json:"isDir"`
+		DeletedAt int64             `json:"deletedAt"`
+		Versions  []TrashVersionRef `json:"versions"`
+	}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, fmt.Errorf("trash: corrupt metadata for %s: %w", trashID, err)
+	}
+	return &TrashItem{ID: trashID, Name: m.Name, OrigPath: m.OrigPath, IsDir: m.IsDir,
+		DeletedAt: m.DeletedAt, Versions: m.Versions}, nil
+}
+
 func (d *Driver) PurgeTrashItem(username, trashID string) error {
 	if !validID(trashID) {
 		return ErrInvalid
@@ -684,19 +822,37 @@ func (d *Driver) EmptyTrash(username string) error {
 	return os.RemoveAll(filepath.Join(d.root, "trash", username))
 }
 
-// PurgeOldTrash removes trashed items older than cutoff. Returns purged count.
-func (d *Driver) PurgeOldTrash(cutoff time.Time) int {
+// minPlausibleUnix is the oldest DeletedAt we trust (2001-09-09). Anything at
+// or below it (0 = Unix epoch, negatives, garbage) marks unusable metadata.
+const minPlausibleUnix = 1_000_000_000
+
+// PurgedTrash identifies a trash item the janitor removed permanently.
+type PurgedTrash struct {
+	Username string // trash owner (directory name under trash/)
+	OrigPath string // drive-relative original path ("" if metadata lacked it)
+}
+
+// PurgeOldTrash removes trashed items older than cutoff and returns the
+// purged items' identity, so callers can drop their version history (index
+// rows + blob dirs) exactly like the interactive permanent-purge sites do.
+//
+// Safety: items whose metadata is unreadable or corrupt, and items whose
+// deletedAt is implausible, are SKIPPED — never purged. Corrupt metadata must
+// not destroy restorable payloads; only a plausible timestamp strictly older
+// than the cutoff authorizes a purge.
+func (d *Driver) PurgeOldTrash(cutoff time.Time) []*PurgedTrash {
 	base := filepath.Join(d.root, "trash")
 	users, err := os.ReadDir(base)
 	if err != nil {
-		return 0
+		return nil
 	}
-	n := 0
+	var purged []*PurgedTrash
 	for _, u := range users {
 		if !u.IsDir() {
 			continue
 		}
-		ents, err := os.ReadDir(filepath.Join(base, u.Name()))
+		dir := filepath.Join(base, u.Name())
+		ents, err := os.ReadDir(dir)
 		if err != nil {
 			continue
 		}
@@ -704,24 +860,139 @@ func (d *Driver) PurgeOldTrash(cutoff time.Time) int {
 			if !strings.HasSuffix(ent.Name(), ".json") {
 				continue
 			}
-			raw, err := os.ReadFile(filepath.Join(base, u.Name(), ent.Name()))
+			raw, err := os.ReadFile(filepath.Join(dir, ent.Name()))
 			if err != nil {
+				log.Printf("fsdrv: trash purge: cannot read %s/%s: %v; skipping", u.Name(), ent.Name(), err)
 				continue
 			}
-			var m struct{ DeletedAt int64 }
-			if json.Unmarshal(raw, &m) != nil || time.Unix(m.DeletedAt, 0).Before(cutoff) {
-				id := strings.TrimSuffix(ent.Name(), ".json")
-				if os.RemoveAll(filepath.Join(base, u.Name(), id)) == nil {
-					os.Remove(filepath.Join(base, u.Name(), ent.Name()))
-					n++
-				}
+			var m struct {
+				DeletedAt int64  `json:"deletedAt"`
+				OrigPath  string `json:"origPath"`
+			}
+			if json.Unmarshal(raw, &m) != nil {
+				log.Printf("fsdrv: trash purge: corrupt metadata in %s/%s; skipping, payload preserved", u.Name(), ent.Name())
+				continue
+			}
+			if m.DeletedAt < minPlausibleUnix {
+				log.Printf("fsdrv: trash purge: implausible deletedAt=%d in %s/%s; skipping", m.DeletedAt, u.Name(), ent.Name())
+				continue
+			}
+			if !time.Unix(m.DeletedAt, 0).Before(cutoff) {
+				continue // not old enough yet
+			}
+			id := strings.TrimSuffix(ent.Name(), ".json")
+			if os.RemoveAll(filepath.Join(dir, id)) == nil {
+				os.Remove(filepath.Join(dir, ent.Name()))
+				purged = append(purged, &PurgedTrash{Username: u.Name(), OrigPath: m.OrigPath})
 			}
 		}
 	}
-	return n
+	return purged
 }
 
 // ---- versions ----
+
+// RelocateVersionDir renames the on-disk version-blob directory for a logical
+// path after that path was renamed/moved:
+//
+//	versions/<user>/<pathHash(old)> → versions/<user>/<pathHash(new)>
+//
+// A missing source directory means the path had no stored history — a no-op,
+// never an error. If the destination already exists (both names carried
+// history, e.g. stale rows) the blobs are merged file-by-file: version ids
+// are random 32-hex identifiers so name collisions cannot occur.
+func (d *Driver) RelocateVersionDir(username, oldLogical, newLogical string) error {
+	// Write side of the blob race guard: an in-flight open of either name
+	// completes before the directory moves (see VersionBlobMu).
+	VersionBlobMu.Lock()
+	defer VersionBlobMu.Unlock()
+	vroot := filepath.Join(d.root, "versions", username)
+	src := filepath.Join(vroot, pathHash(oldLogical))
+	dst := filepath.Join(vroot, pathHash(newLogical))
+	if _, err := os.Lstat(src); err != nil {
+		return nil // no blobs stored for this path
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(dst); errors.Is(err, os.ErrNotExist) {
+		return os.Rename(src, dst)
+	}
+	ents, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	for _, ent := range ents {
+		if err := os.Rename(filepath.Join(src, ent.Name()), filepath.Join(dst, ent.Name())); err != nil &&
+			!errors.Is(err, os.ErrExist) {
+			return err
+		}
+	}
+	return os.Remove(src)
+}
+
+// DeleteVersionDir permanently removes every stored blob for a logical path
+// (called only when a trash item is purged for good). A missing directory is
+// not an error. Write side of the blob race guard: concurrent opens of these
+// blobs complete first (see VersionBlobMu).
+func (d *Driver) DeleteVersionDir(username, logical string) error {
+	VersionBlobMu.Lock()
+	defer VersionBlobMu.Unlock()
+	return os.RemoveAll(filepath.Join(d.root, "versions", username, pathHash(logical)))
+}
+
+// BlobMove names one version blob to relocate between two logical paths.
+type BlobMove struct {
+	From      string // source logical path (blob dir key)
+	To        string // destination logical path (blob dir key)
+	VersionID string
+}
+
+// RelocateVersionBlobs moves individually listed version blobs between their
+// logical paths' blob dirs (versions/<user>/<pathHash(path)>/<versionID>).
+// Used when only PART of a path's stored history belongs to the item being
+// moved — trash-restore onto a reused path must not drag a newer occupant's
+// blobs along. Missing sources are not an error. Write side of the blob race
+// guard (see VersionBlobMu).
+func (d *Driver) RelocateVersionBlobs(username string, moves []BlobMove) error {
+	VersionBlobMu.Lock()
+	defer VersionBlobMu.Unlock()
+	var firstErr error
+	for _, mv := range moves {
+		if !validID(mv.VersionID) || mv.From == "" || mv.To == "" {
+			continue
+		}
+		src := filepath.Join(d.root, "versions", username, pathHash(mv.From), mv.VersionID)
+		dstDir := filepath.Join(d.root, "versions", username, pathHash(mv.To))
+		if err := os.MkdirAll(dstDir, 0o700); err != nil && firstErr == nil {
+			firstErr = err
+			continue
+		}
+		if err := os.Rename(src, filepath.Join(dstDir, mv.VersionID)); err != nil &&
+			!errors.Is(err, os.ErrNotExist) && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// PruneVersionBlob removes one pruned version blob under VersionBlobMu — the
+// janitor-side counterpart of OpenVersion's read lock. A missing file is not
+// an error. When the blob's pathHash directory becomes empty it is removed
+// too, so targeted purges leave no litter behind.
+func (d *Driver) PruneVersionBlob(username, rel, versionID string) error {
+	VersionBlobMu.Lock()
+	defer VersionBlobMu.Unlock()
+	blob := d.VersionBlobPath(username, rel, versionID)
+	err := os.Remove(blob)
+	if errors.Is(err, os.ErrNotExist) {
+		err = nil
+	}
+	// Best-effort: drop the per-path directory once its last blob is gone.
+	// ENOTEMPTY (other versions of the same path remain) is expected and fine.
+	_ = os.Remove(filepath.Dir(blob))
+	return err
+}
 
 func (d *Driver) snapshotVersion(username, logical, abs string) (string, int64, error) {
 	src, err := os.Open(abs)
@@ -737,7 +1008,10 @@ func (d *Driver) snapshotVersion(username, logical, abs string) (string, int64, 
 	if err := os.MkdirAll(vdir, 0o700); err != nil {
 		return "", 0, err
 	}
-	vid := newID()
+	vid, err := newID()
+	if err != nil {
+		return "", 0, err
+	}
 	dst, err := os.OpenFile(filepath.Join(vdir, vid+".tmp"), os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return "", 0, err
@@ -779,6 +1053,10 @@ func (d *Driver) OpenVersion(username, rel, versionID string) (*os.File, int64, 
 	if !validID(versionID) {
 		return nil, 0, ErrInvalid
 	}
+	// Read side of the blob race guard (see VersionBlobMu): a concurrent
+	// prune/purge must not unlink this blob between resolve and open.
+	VersionBlobMu.RLock()
+	defer VersionBlobMu.RUnlock()
 	_, logical, err := d.ResolveUserPath(username, rel)
 	if err != nil {
 		return nil, 0, err
@@ -790,18 +1068,6 @@ func (d *Driver) OpenVersion(username, rel, versionID string) (*os.File, int64, 
 	}
 	fi, _ := f.Stat()
 	return f, fi.Size(), nil
-}
-
-func (d *Driver) DeleteVersion(username, rel, versionID string) error {
-	if !validID(versionID) {
-		return ErrInvalid
-	}
-	_, logical, err := d.ResolveUserPath(username, rel)
-	if err != nil {
-		return err
-	}
-	err = os.Remove(filepath.Join(d.root, "versions", username, pathHash(logical), versionID))
-	return mapStatErr(err)
 }
 
 // RestoreVersion replaces current content with a stored version.
@@ -839,10 +1105,15 @@ func (d *Driver) HashFile(username, rel string) (string, error) {
 
 func (d *Driver) Search(username, query string, limit int) ([]*Entry, error) {
 	q := strings.ToLower(query)
-	root := filepath.Join(d.root, "files", username)
+	// Route through the same containment check as every other entry point so
+	// a hostile username can't point the walk outside files/.
+	root, _, err := d.ResolveUserPath(username, "/")
+	if err != nil {
+		return nil, err
+	}
 	var out []*Entry
 	stop := errors.New("stop")
-	err := filepath.WalkDir(root, func(path string, de os.DirEntry, err error) error {
+	err = filepath.WalkDir(root, func(path string, de os.DirEntry, err error) error {
 		if err != nil {
 			return nil // skip unreadable
 		}
@@ -894,6 +1165,14 @@ func (d *Driver) WalkTree(username, rel string, fn func(e *Entry, abs string) er
 		if werr != nil {
 			return nil
 		}
+		// Skip sync-staging files (parity with List); skip their whole
+		// subtree if one names a directory.
+		if isStagingEntry(de.Name()) {
+			if de.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		relp, rerr := filepath.Rel(absRoot, p)
 		if rerr != nil {
 			return nil
@@ -914,12 +1193,40 @@ func (d *Driver) WalkTree(username, rel string, fn func(e *Entry, abs string) er
 
 func (d *Driver) tmpDir() string { return filepath.Join(d.root, "tmp") }
 
-func newID() string {
-	b := make([]byte, 16)
-	if _, err := crandRead(b); err != nil {
-		panic(err)
+// OpenRegular opens abs for reading only when Lstat says it is a regular
+// file. Symlinks — including links pointing at files inside the same tree —
+// and specials are refused WITHOUT being followed, so tree walkers that
+// stream absolute paths (zip download today; shared-folder zip next) cannot
+// be tricked into reading content planted via shell/rsync access. Caller
+// closes the file.
+func OpenRegular(abs string) (*os.File, os.FileInfo, error) {
+	fi, err := os.Lstat(abs)
+	if err != nil {
+		return nil, nil, err
 	}
-	return hex.EncodeToString(b)
+	if !fi.Mode().IsRegular() {
+		return nil, nil, fmt.Errorf("%s: not a regular file", filepath.Base(abs))
+	}
+	f, err := os.Open(abs)
+	if err != nil {
+		return nil, nil, err
+	}
+	sfi, serr := f.Stat()
+	if serr != nil {
+		f.Close()
+		return nil, nil, serr
+	}
+	return f, sfi, nil
+}
+
+// newID returns a fresh random 32-hex identifier. Errors are propagated to
+// callers (both call sites have error returns) instead of panicking.
+func newID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate id: %w", err)
+	}
+	return hex.EncodeToString(b), nil
 }
 
 func validID(id string) bool {

@@ -4,7 +4,6 @@ import android.os.Bundle
 import android.widget.Button
 import android.widget.EditText
 import android.widget.TextView
-import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import com.piercingxx.xxdrive.theme.ThemeChrome
 import kotlinx.coroutines.CoroutineScope
@@ -41,6 +40,10 @@ class LoginActivity : AppCompatActivity() {
         val pass = findViewById<EditText>(R.id.passInput)
         val btn = findViewById<Button>(R.id.loginBtn)
         val err = findViewById<TextView>(R.id.errorText)
+
+        // Session.clear() keeps the last server URL on purpose — failed-then-
+        // retry should not mean retyping http://192.168.x.x.
+        url.setText(LoginPrefill.serverHint(Session.baseUrl))
 
         btn.setOnClickListener {
             val base = url.text.toString().trim().trimEnd('/')

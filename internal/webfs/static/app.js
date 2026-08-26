@@ -135,6 +135,23 @@
     location.reload();
   });
 
+  $("fabricBtn").addEventListener("click", async () => {
+    $("fabricErr").textContent = "";
+    const tok = $("liToken").value.trim();
+    if (!tok) { $("fabricErr").textContent = "Paste an estate token first."; return; }
+    try {
+      const r = await api("/api/auth/fabric", { method: "POST", json: { token: tok } });
+      S.me = r.user;
+      enterApp();
+    } catch (e) { $("fabricErr").textContent = e.message; }
+  });
+
+  $("liToken").addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") { ev.preventDefault(); $("fabricBtn").click(); }
+  });
+
+  $("accountBtn").addEventListener("click", () => accountDialog());
+
   // ---------- navigation ----------
   document.querySelectorAll("#nav button").forEach((b) =>
     b.addEventListener("click", () => setView(b.dataset.view)));
@@ -266,6 +283,12 @@
     const n = S.selection.size;
     bar.classList.toggle("on", n > 0);
     $("selCount").textContent = n ? n + " selected" : "";
+    // Share is single-item only; keep it visible but disabled with an
+    // explanation instead of hiding it silently.
+    const shareBtn = bar.querySelector('button[data-act="share"]');
+    shareBtn.disabled = n !== 1;
+    shareBtn.title = n === 1 ? "Share this item"
+      : "Select exactly one item to share";
   }
 
   function fileTable(list) {
@@ -276,7 +299,7 @@
     const trh = el("tr", {},
       el("th", { style: "width:34px" }),
       mkTh("Name", "name"),
-      el("th", { style: "width:110px" }, "Size"),
+      mkTh("Size", "size"),
       mkTh("Modified", "mtime"),
       el("th", { style: "width:60px" }));
     t.append(el("thead", {}, trh));
@@ -428,8 +451,13 @@
 
   $("uploadBtn").addEventListener("click", () => $("fileInput").click());
   $("fileInput").addEventListener("change", () => {
-    queueUploads([...$("fileInput").files]);
+    queueUploads([...$("fileInput").files].map((f) => ({ file: f, rel: f.name })));
     $("fileInput").value = "";
+  });
+  $("folderUploadBtn").addEventListener("click", () => $("dirInput").click());
+  $("dirInput").addEventListener("change", () => {
+    queueUploads([...$("dirInput").files].map((f) => ({ file: f, rel: f.webkitRelativePath || f.name })));
+    $("dirInput").value = "";
   });
 
   // ---------- drag & drop ----------
@@ -443,29 +471,66 @@
     if (--dragDepth <= 0) { dragDepth = 0; $("dropOverlay").classList.remove("on"); }
   });
   content.addEventListener("dragover", (ev) => ev.preventDefault());
-  content.addEventListener("drop", (ev) => {
+  content.addEventListener("drop", async (ev) => {
     ev.preventDefault();
     dragDepth = 0;
     $("dropOverlay").classList.remove("on");
-    queueUploads([...ev.dataTransfer.files]);
+    const dt = ev.dataTransfer;
+    const items = dt && dt.items ? [...dt.items] : [];
+    if (items.length && items.some((it) => it.webkitGetAsEntry)) {
+      const found = await entriesFromDataTransfer(items);
+      if (found.length) { queueUploads(found); return; }
+    }
+    queueUploads([...(dt ? dt.files : [])].map((f) => ({ file: f, rel: f.name })));
   });
 
-  // ---------- uploads ----------
-  function queueUploads(files) {
-    if (!files.length) return;
-    $("uploadsPanel").classList.add("on");
-    for (const f of files) uploadOne(f);
+  async function entriesFromDataTransfer(items) {
+    const out = [];
+    const roots = items.map((it) => it.webkitGetAsEntry && it.webkitGetAsEntry()).filter(Boolean);
+    const walk = async (entry, prefix) => {
+      if (entry.isFile) {
+        const f = await new Promise((res, rej) => entry.file(res, rej));
+        out.push({ file: f, rel: prefix + f.name });
+      } else if (entry.isDirectory) {
+        const reader = entry.createReader();
+        let batch;
+        do {
+          batch = await new Promise((res) => reader.readEntries(res, () => res([])));
+          for (const child of batch) await walk(child, prefix + entry.name + "/");
+        } while (batch.length);
+      }
+    };
+    for (const root of roots) await walk(root, "");
+    return out;
   }
 
-  function uploadOne(file) {
-    // target path = current dir + filename; conflict=rename keeps both copies
-    const target = (S.path === "/" ? "" : S.path) + "/" + file.name;
+  // ---------- uploads ----------
+  function queueUploads(items) {
+    if (!items.length) return;
+    $("uploadsPanel").classList.add("on");
+    for (const it of items) uploadOne(it.file, it.rel);
+  }
+
+  function uploadOne(file, rel, overwrite, fixedTarget) {
+    const displayName = rel || file.name;
+    const target = fixedTarget || ((S.path === "/" ? "" : S.path) + "/" + displayName);
     const item = el("div", { class: "up-item" },
       el("div", { class: "row1" },
-        el("span", {}, file.name),
+        el("span", {}, displayName),
+        el("span", { class: "up-actions" }),
         el("button", { class: "x", title: "Cancel" }, "✕")),
       el("div", { class: "bar" }, el("i")));
     $("uploadsList").prepend(item);
+    const actions = item.querySelector(".up-actions");
+    const addReplaceBtn = () => actions.append(el("button", {
+      class: "small",
+      title: "Overwrite the original — its current content is kept as a version",
+      onclick: () => { item.remove(); uploadOne(file, rel, true, target); },
+    }, "Replace"));
+    if (!overwrite && S.view === "files" && !(rel && rel.includes("/"))
+        && S.entries.some((e) => !e.isDir && e.name === file.name)) {
+      addReplaceBtn();
+    }
     const xhr = new XMLHttpRequest();
     item._xhr = xhr;
     item.querySelector(".x").addEventListener("click", () => xhr.abort());
@@ -474,23 +539,26 @@
       if (ev.lengthComputable) bar.style.width = (ev.loaded / ev.total) * 100 + "%";
     });
     xhr.addEventListener("load", () => {
-      if (xhr.status === 200) {
-        let r = {};
-        try { r = JSON.parse(xhr.responseText); } catch {}
-        item.classList.add("done");
+      let r = {};
+      try { r = JSON.parse(xhr.responseText); } catch {}
+      if (xhr.status >= 200 && xhr.status < 300) {
+        item.classList.add(r.conflicted ? "conflict" : "done");
         bar.style.width = "100%";
-        if (r.conflicted) toast("Conflict copy created for " + file.name);
+        if (r.conflicted) {
+          toast("Saved as conflict copy " + ((r.entry && r.entry.name) || file.name));
+          addReplaceBtn();
+        }
         setTimeout(refreshCurrent, 400);
       } else {
         item.classList.add("fail");
-        let r = {}; try { r = JSON.parse(xhr.responseText); } catch {}
-        toast(file.name + ": " + (r.error || ("HTTP " + xhr.status)), "err");
+        toast(displayName + ": " + (r.error || ("HTTP " + xhr.status)), "err");
       }
       maybeHideUploads();
     });
     xhr.addEventListener("error", () => { item.classList.add("fail"); maybeHideUploads(); });
     xhr.addEventListener("abort", () => { item.remove(); maybeHideUploads(); });
-    xhr.open("POST", "/api/files/upload?path=" + encodeURIComponent(target) + "&conflict=rename");
+    xhr.open("POST", "/api/files/upload?path=" + encodeURIComponent(target)
+      + (overwrite ? "" : "&conflict=rename"));
     const fd = new FormData();
     fd.append("file", file, file.name);
     xhr.send(fd);
@@ -529,8 +597,14 @@
       for (const e of results) {
         const row = el("div", { class: "share-row" },
           el("span", {}, iconFor(e)),
-          el("a", { href: "#", onclick: (ev) => { ev.preventDefault(); navTo(parentOf(e.path)); } },
+          el("a", { href: "#", title: "Open", onclick: (ev) => { ev.preventDefault(); openFromSearch(e); } },
             parentOf(e.path) === "/" ? e.path : e.path),
+          el("button", {
+            class: "small",
+            onclick: () => window.open(e.isDir
+              ? "/api/files/zip?path=" + encodeURIComponent(e.path)
+              : "/api/files/download?path=" + encodeURIComponent(e.path), "_blank"),
+          }, "Download"),
           el("span", { class: "dim", style: "margin-left:auto" }, e.isDir ? "folder" : fmtSize(e.size)));
         area.append(row);
       }
@@ -541,6 +615,18 @@
     const i = p.lastIndexOf("/");
     return i <= 0 ? "/" : p.slice(0, i);
   };
+
+  async function openFromSearch(e) {
+    $("searchInput").value = "";
+    S.view = "files";
+    S.selection.clear();
+    document.querySelectorAll("#nav button").forEach((b) => b.classList.remove("active"));
+    $("filesToolbar").style.display = "";
+    $("crumbs").style.visibility = "visible";
+    $("rail").classList.remove("open");
+    await navTo(e.isDir ? e.path : parentOf(e.path));
+    if (!e.isDir) openPreview(e);
+  }
 
   // ---------- starred ----------
   async function renderStarred() {
@@ -577,7 +663,7 @@
         el("td", { class: "dim" }, sh.allowDownload ? "allowed" : "view only"),
         el("td", {},
           el("button", {
-            class: "small", onclick: () => copyText(location.origin + sh.url),
+            class: "small", onclick: () => copyText(absoluteShareURL(sh.url)),
           }, "Copy link"),
           " ",
           el("button", {
@@ -589,6 +675,10 @@
     }
     t.append(tb);
     area.append(t);
+  }
+
+  function absoluteShareURL(u) {
+    return /^https?:\/\//i.test(u) ? u : location.origin + u;
   }
 
   function copyText(text) {
@@ -712,7 +802,20 @@
                 toast("Password updated", "ok");
               } catch (e) { toast(e.message, "err"); }
             }),
-          }, "Set password"))));
+          }, "Set password"),
+          " ",
+          u.disabled && u.username !== S.me.username
+            ? el("button", {
+                class: "small danger",
+                onclick: () => confirmModal("Permanently delete “" + u.username + "” and all of their files? This cannot be undone.", async () => {
+                  try {
+                    await api("/api/admin/users/delete", { method: "POST", json: { username: u.username } });
+                    toast("User deleted", "ok");
+                    renderAdmin();
+                  } catch (e) { toast(e.message, "err"); }
+                }),
+              }, "Delete")
+            : null)));
     }
     t.append(tb);
     box.append(t);
@@ -831,9 +934,10 @@
         const mine = shares.filter((s) => s.path === path);
         if (!mine.length) { wrap.append(el("div", { class: "dim", style: "font-size:12px" }, "No existing links for this item.")); return; }
         for (const s of mine) {
+          const url = absoluteShareURL(s.url);
           wrap.append(el("div", { class: "share-row" },
-            el("span", {}, location.origin + s.url),
-            el("button", { class: "small", onclick: () => copyText(location.origin + s.url) }, "Copy"),
+            el("span", {}, url),
+            el("button", { class: "small", onclick: () => copyText(url) }, "Copy"),
             el("button", {
               class: "small danger", onclick: async () => {
                 try { await api("/api/shares/" + s.tokenHash, { method: "DELETE" }); toast("Revoked", "ok"); closeModal(); shareDialog(e); }
@@ -876,10 +980,92 @@
     showModal(box);
   }
 
+  // ---------- account: sessions & password ----------
+  function accountDialog() {
+    const sessWrap = el("div");
+    const pwErr = el("div", { class: "err-msg" });
+    const curPw = el("input", { type: "password", autocomplete: "current-password" });
+    const newPw = el("input", { type: "password", autocomplete: "new-password" });
+    const confPw = el("input", { type: "password", autocomplete: "new-password" });
+
+    async function loadSessions() {
+      sessWrap.innerHTML = "";
+      sessWrap.append(el("div", { class: "dim" }, "Loading sessions…"));
+      let sess = [];
+      try { sess = await api("/api/auth/sessions"); }
+      catch (e) {
+        sessWrap.innerHTML = "";
+        sessWrap.append(el("div", { class: "err-msg" }, e.message));
+        return;
+      }
+      sessWrap.innerHTML = "";
+      if (!sess.length) { sessWrap.append(el("div", { class: "dim" }, "No active sessions.")); return; }
+      const t = el("table", { class: "plain" });
+      const tb = el("tbody");
+      for (const s of sess) {
+        tb.append(el("tr", {},
+          el("td", {}, (s.label || "session") + (s.current ? " " : "")),
+          el("td", { class: "dim" }, fmtDate(s.lastSeen)),
+          el("td", {}, s.current ? el("span", { class: "tag-current" }, "this device") : "")));
+      }
+      t.append(tb);
+      sessWrap.append(t);
+    }
+
+    const revokeBtn = el("button", {
+      onclick: async () => {
+        try {
+          const r = await api("/api/auth/sessions/revoke-others", { method: "POST" });
+          toast("Signed out " + r.revoked + " other device(s)", "ok");
+          loadSessions();
+        } catch (e) { toast(e.message, "err"); }
+      },
+    }, "Sign out other devices");
+
+    const pwForm = el("form", {},
+      el("label", {}, "Current password"), curPw,
+      el("label", {}, "New password"), newPw,
+      el("label", {}, "Confirm new password"), confPw, pwErr,
+      el("div", { class: "actions" },
+        el("button", { type: "button", onclick: closeModal }, "Close"),
+        el("button", { class: "primary", type: "submit" }, "Change password")));
+    pwForm.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      pwErr.textContent = "";
+      if (!newPw.value || newPw.value.length < 8) { pwErr.textContent = "New password must be at least 8 characters."; return; }
+      if (newPw.value !== confPw.value) { pwErr.textContent = "Passwords do not match."; return; }
+      try {
+        await api("/api/auth/password", { method: "POST", json: {
+          current_password: curPw.value, new_password: newPw.value } });
+        toast("Password changed", "ok");
+        curPw.value = ""; newPw.value = ""; confPw.value = "";
+      } catch (e) { pwErr.textContent = e.message; }
+    });
+
+    showModal(el("div", {},
+      el("h3", {}, "Account — " + S.me.username),
+      el("div", { class: "sect" }, "Devices signed in"),
+      sessWrap,
+      el("div", { class: "actions" }, revokeBtn),
+      el("div", { class: "sect" }, "Change password"),
+      pwForm));
+    loadSessions();
+  }
+
   // ---------- preview ----------
   const IMG_EXT = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".bmp", ".svg"];
   const VID_EXT = [".mp4", ".webm", ".mov", ".m4v"];
   const TEXT_EXT = [".txt", ".md", ".json", ".js", ".css", ".html", ".xml", ".yml", ".yaml", ".log", ".csv", ".go", ".py", ".sh"];
+
+  // Object URLs are expensive and pinned for the page's lifetime; exactly one
+  // image preview can be live at a time, so revoke on close and before replace.
+  let previewBlobURL = null;
+  function revokePreviewBlob() {
+    if (previewBlobURL) {
+      URL.revokeObjectURL(previewBlobURL);
+      previewBlobURL = null;
+    }
+  }
 
   async function openPreview(e) {
     const ext = extOf(e.name);
@@ -888,7 +1074,9 @@
       const lb = $("lightbox");
       lb.innerHTML = "";
       const img = el("img");
-      img.src = URL.createObjectURL(await (await fetch(url)).blob());
+      revokePreviewBlob();
+      previewBlobURL = URL.createObjectURL(await (await fetch(url)).blob());
+      img.src = previewBlobURL;
       lb.append(img);
       lb.classList.add("on");
     } else if (VID_EXT.includes(ext)) {
@@ -917,22 +1105,41 @@
   }
 
   $("lightbox").addEventListener("click", () => {
+    revokePreviewBlob();
     $("lightbox").classList.remove("on");
     $("lightbox").innerHTML = "";
   });
 
   // ---------- keyboard ----------
   document.addEventListener("keydown", (ev) => {
+    const typing = ev.target.closest("input, textarea");
     if (ev.key === "Escape") {
       $("ctxMenu").classList.remove("on");
+      revokePreviewBlob();
       $("lightbox").classList.remove("on");
       $("lightbox").innerHTML = "";
       closeModal();
       S.selection.clear();
       drawSelection();
     }
+    // Select all visible entries. (Arrow-key browsing is still TODO.)
+    if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === "a"
+        && S.view === "files" && !typing) {
+      ev.preventDefault();
+      S.selection.clear();
+      for (const e of S.entries) S.selection.add(e.path);
+      drawSelection();
+      return;
+    }
+    // Enter opens the last-selected item, same as double-clicking its row.
+    if (ev.key === "Enter" && S.view === "files" && !typing && S.selection.size) {
+      const sel = selectedEntries();
+      const entry = sel[sel.length - 1];
+      if (entry) rowOpen(entry);
+      return;
+    }
     if ((ev.key === "Delete") && S.selection.size && S.view === "files"
-        && !ev.target.closest("input, textarea")) {
+        && !typing) {
       actOnSelection("delete");
     }
   });

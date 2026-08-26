@@ -8,19 +8,25 @@
 //	xxdrive rm <path>                         move a remote item to trash
 //	xxdrive mv <path> <destDir>               move within the drive
 //	xxdrive cp <path> <destDir>               copy within the drive
-//	xxdrive up <localFile> <remotePath>       upload one file
+//	xxdrive up <localFile> <remotePath>       upload one file (overwrite + version)
 //	xxdrive down <remotePath> [localFile]     download one file
 //	xxdrive sync <localDir> <remoteDir>       two-way synchronize (see below)
 //	xxdrive watch <localDir> <remoteDir>      sync continuously every N seconds
 //
+// Safety-net and account verbs: whoami, logout, trash, versions, share,
+// search, star/starred, sessions — run `xxdrive help` for the full list.
+//
 // Sync model: three-way reconcile against a stored baseline (last-synced state).
-// Changes are classified local-only / remote-only / both; "both" produces
-// conflict copies on each side instead of overwriting — no data loss, ever,
+// Changes are classified local-only / remote-only / both. Local-only edits
+// overwrite the remote copy (the server snapshots a version first); remote-only
+// edits are pulled down; "both" produces conflict copies — no data loss, ever,
 // matching the server's conflict-copy contract.
 package main
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -76,6 +82,24 @@ func main() {
 		err = cmdSync(args, false, *interval)
 	case "watch":
 		err = cmdSync(args, true, *interval)
+	case "whoami":
+		err = cmdWhoami(args)
+	case "logout":
+		err = cmdLogout(args)
+	case "trash":
+		err = cmdTrash(args)
+	case "versions":
+		err = cmdVersions(args)
+	case "share":
+		err = cmdShare(args)
+	case "search":
+		err = cmdSearch(args)
+	case "star":
+		err = cmdStarToggle(args)
+	case "starred":
+		err = cmdStarred(args)
+	case "sessions":
+		err = cmdSessions(args)
 	case "-h", "--help", "help":
 		usage()
 	default:
@@ -96,13 +120,33 @@ Usage:
 
 Commands:
   login <url> <username>          Authenticate (password prompted) and save
+  whoami                          Show the logged-in user
+  logout                          Invalidate the session, clear stored token
   ls [path]                       List remote folder
   mkdir <path>                    Create remote folder
   rm <path>                       Move remote item to trash
   mv <path> <destDir>             Move remote item
   cp <path> <destDir>             Copy remote item
-  up <localFile> <remotePath>     Upload a file
+  up [--if-match ETAG] <local> <remotePath>
+                                  Upload a file (overwrites; prior version kept;
+                                  --if-match fails with 412 on etag mismatch)
   down <remotePath> [localFile]   Download a file
+  trash ls                        List trashed items
+  trash restore <trashId>         Restore a trashed item
+  trash delete <trashId>          Permanently purge one trashed item
+  trash empty                     Permanently empty the trash
+  versions ls <path>              List stored versions of a file
+  versions restore <path> <id>    Roll a file back to a version
+  versions get <path> <id> [out]  Download a version (stdout if no out)
+  share ls                        List active shares
+  share create <path> [--no-download] [--password PW] [--expires-days N]
+                                  Create a public share; prints the URL
+  share revoke <tokenOrHash>      Revoke a share by token or id
+  search <query>                  Search the drive by name
+  star <path>                     Toggle a star on a path
+  starred                         List starred items
+  sessions                        List sessions (* = this one)
+  sessions revoke-others          Log out every other device
   sync <localDir> <remoteDir>     Two-way sync once
   watch <localDir> <remoteDir>    Two-way sync continuously (--interval N)
 
@@ -282,19 +326,7 @@ func cmdLs(args []string) error {
 	if err != nil {
 		return err
 	}
-	sort.Slice(ents, func(i, j int) bool {
-		if ents[i].IsDir != ents[j].IsDir {
-			return ents[i].IsDir
-		}
-		return ents[i].Name < ents[j].Name
-	})
-	for _, e := range ents {
-		kind := "f"
-		if e.IsDir {
-			kind = "d"
-		}
-		fmt.Printf("%s %10d %s %s\n", kind, e.Size, time.Unix(e.Mtime, 0).Format("2006-01-02 15:04"), e.Name)
-	}
+	printEntries(ents, false)
 	return nil
 }
 
@@ -348,16 +380,23 @@ func cmdMoveCopy(args []string, ep string, extra map[string]any) error {
 }
 
 func cmdUp(args []string) error {
-	if len(args) < 2 {
-		return fmt.Errorf("usage: xxdrive up <localFile> <remotePath>")
+	fs := flag.NewFlagSet("up", flag.ExitOnError)
+	ifMatch := fs.String("if-match", "", "overwrite only if ETAG matches the remote's current etag (HTTP 412 otherwise)")
+	fs.Parse(args)
+	if fs.NArg() < 2 {
+		return fmt.Errorf("usage: xxdrive up [--if-match ETAG] <localFile> <remotePath>")
 	}
 	c, err := loadCfg()
 	if err != nil {
 		return err
 	}
-	_, err = uploadFile(c, args[0], args[1], true)
+	// Default to overwrite+version: an explicit `up` replaces the remote file
+	// (the server snapshots the previous content). conflict=rename is reserved
+	// for camera backup and true sync conflicts.
+	local, remote := fs.Arg(0), fs.Arg(1)
+	_, err = uploadFile(c, local, remote, *ifMatch, false)
 	if err == nil {
-		fmt.Println("uploaded", args[0], "->", args[1])
+		fmt.Println("uploaded", local, "->", remote)
 	}
 	return err
 }
@@ -381,9 +420,459 @@ func cmdDown(args []string) error {
 	return err
 }
 
+// ---------- account / safety-net verbs ----------
+
+func cmdWhoami(args []string) error {
+	c, err := loadCfg()
+	if err != nil {
+		return err
+	}
+	out, err := doJSON("GET", c.BaseURL+"/api/auth/me", c.Token, nil)
+	if err != nil {
+		return err
+	}
+	user, _ := out["username"].(string)
+	tags := ""
+	if admin, _ := out["isAdmin"].(bool); admin {
+		tags += " [admin]"
+	}
+	if fab, _ := out["fabric"].(bool); fab {
+		tags += " [sso]"
+	}
+	fmt.Println(user + tags)
+	return nil
+}
+
+func cmdLogout(args []string) error {
+	c, err := loadCfg()
+	if err != nil {
+		return err
+	}
+	// The server invalidates the session; clearing the local token must
+	// happen even if the server is unreachable or the session is already dead.
+	if _, err := doJSON("POST", c.BaseURL+"/api/auth/logout", c.Token, nil); err != nil {
+		fmt.Fprintln(os.Stderr, "warning: server logout failed:", err)
+	}
+	c.Token = ""
+	if err := saveCfg(c); err != nil {
+		return err
+	}
+	fmt.Println("logged out — token cleared from", cfgPath)
+	return nil
+}
+
+type trashItem struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	OrigPath  string `json:"origPath"`
+	IsDir     bool   `json:"isDir"`
+	Size      int64  `json:"size"`
+	DeletedAt int64  `json:"deletedAt"`
+}
+
+func trashList(c *config) ([]trashItem, error) {
+	var items []trashItem
+	err := getInto(c, "/api/trash", &items)
+	return items, err
+}
+
+func cmdTrash(args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: xxdrive trash ls|restore <trashId>|delete <trashId>|empty")
+	}
+	c, err := loadCfg()
+	if err != nil {
+		return err
+	}
+	switch args[0] {
+	case "ls":
+		items, err := trashList(c)
+		if err != nil {
+			return err
+		}
+		for _, it := range items {
+			kind := "f"
+			if it.IsDir {
+				kind = "d"
+			}
+			fmt.Printf("%s %s %10d %s %s\n", it.ID, kind, it.Size,
+				time.Unix(it.DeletedAt, 0).Format("2006-01-02 15:04"), it.OrigPath)
+		}
+	case "restore", "delete":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: xxdrive trash %s <trashId>", args[0])
+		}
+		ep := "/api/trash/restore"
+		if args[0] == "delete" {
+			ep = "/api/trash/delete"
+		}
+		out, err := doJSON("POST", c.BaseURL+ep, c.Token, map[string]string{"id": args[1]})
+		if err != nil {
+			return err
+		}
+		if dest, _ := out["restoredTo"].(string); dest != "" {
+			fmt.Println("restored to", dest)
+		} else {
+			fmt.Println("done")
+		}
+	case "empty":
+		items, _ := trashList(c)
+		if _, err := doJSON("POST", c.BaseURL+"/api/trash/empty", c.Token, nil); err != nil {
+			return err
+		}
+		fmt.Printf("trash emptied (%d items)\n", len(items))
+	default:
+		return fmt.Errorf("unknown trash subcommand %q", args[0])
+	}
+	return nil
+}
+
+type versionRow struct {
+	VersionID string `json:"versionId"`
+	Size      int64  `json:"size"`
+	CreatedAt int64  `json:"createdAt"`
+}
+
+func cmdVersions(args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: xxdrive versions ls <path>|restore <path> <versionId>|get <path> <versionId> [out]")
+	}
+	c, err := loadCfg()
+	if err != nil {
+		return err
+	}
+	switch args[0] {
+	case "ls":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: xxdrive versions ls <path>")
+		}
+		var vs []versionRow
+		if err := getInto(c, "/api/versions?path="+urlEscape(args[1]), &vs); err != nil {
+			return err
+		}
+		for _, v := range vs {
+			fmt.Printf("%s %10d %s\n", v.VersionID, v.Size,
+				time.Unix(v.CreatedAt, 0).Format("2006-01-02 15:04"))
+		}
+	case "restore":
+		if len(args) < 3 {
+			return fmt.Errorf("usage: xxdrive versions restore <path> <versionId>")
+		}
+		_, err := doJSON("POST", c.BaseURL+"/api/versions/restore", c.Token,
+			map[string]string{"path": args[1], "versionId": args[2]})
+		if err == nil {
+			fmt.Println("restored", args[1], "@", args[2])
+		}
+		return err
+	case "get":
+		if len(args) < 3 {
+			return fmt.Errorf("usage: xxdrive versions get <path> <versionId> [out]")
+		}
+		dest := "-"
+		if len(args) > 3 {
+			dest = args[3]
+		}
+		n, err := fetchBinary(c, "/api/versions/download?path="+urlEscape(args[1])+"&versionId="+urlEscape(args[2]), dest)
+		if err != nil {
+			return err
+		}
+		if dest != "-" {
+			fmt.Printf("saved %s @ %s -> %s (%d bytes)\n", args[1], args[2], dest, n)
+		}
+	default:
+		return fmt.Errorf("unknown versions subcommand %q", args[0])
+	}
+	return nil
+}
+
+type shareRow struct {
+	TokenHash     string `json:"tokenHash"`
+	Path          string `json:"path"`
+	HasPassword   bool   `json:"hasPassword"`
+	AllowDownload bool   `json:"allowDownload"`
+	ExpiresAt     int64  `json:"expiresAt"`
+	CreatedAt     int64  `json:"createdAt"`
+	URL           string `json:"url"`
+}
+
+func cmdShare(args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: xxdrive share ls|create <path> [...]|revoke <tokenOrHash>")
+	}
+	c, err := loadCfg()
+	if err != nil {
+		return err
+	}
+	switch args[0] {
+	case "ls":
+		var rows []shareRow
+		if err := getInto(c, "/api/shares", &rows); err != nil {
+			return err
+		}
+		for _, sh := range rows {
+			u := sh.URL
+			if u != "" && !strings.HasPrefix(u, "http") {
+				u = c.BaseURL + u // server may report a root-relative link
+			}
+			flags := ""
+			if sh.HasPassword {
+				flags += " [password]"
+			}
+			if !sh.AllowDownload {
+				flags += " [view-only]"
+			}
+			exp := "never"
+			if sh.ExpiresAt > 0 {
+				exp = time.Unix(sh.ExpiresAt, 0).Format("2006-01-02")
+			}
+			fmt.Printf("%s  %s  expires %s%s\n", u, sh.Path, exp, flags)
+		}
+	case "create":
+		fs := flag.NewFlagSet("share create", flag.ExitOnError)
+		noDl := fs.Bool("no-download", false, "view-only share (previews stream, downloads refused)")
+		pw := fs.String("password", "", "require a password to open the share")
+		days := fs.Int("expires-days", 0, "share auto-expires after N days (0 = never)")
+		fs.Parse(args[1:])
+		if fs.NArg() < 1 {
+			return fmt.Errorf("usage: xxdrive share create <path> [--no-download] [--password PW] [--expires-days N]")
+		}
+		payload := map[string]any{"path": fs.Arg(0)}
+		if *noDl {
+			payload["allowDownload"] = false
+		}
+		if *pw != "" {
+			payload["password"] = *pw
+		}
+		if *days > 0 {
+			payload["expiresInDays"] = *days
+		}
+		out, err := doJSON("POST", c.BaseURL+"/api/shares", c.Token, payload)
+		if err != nil {
+			return err
+		}
+		tok, _ := out["token"].(string)
+		if tok == "" {
+			return fmt.Errorf("share create returned no token")
+		}
+		note := ""
+		if *noDl {
+			note += " (view-only)"
+		}
+		if *pw != "" {
+			note += " (password required)"
+		}
+		fmt.Println("shared", fs.Arg(0), "->", c.BaseURL+"/s/"+tok+note)
+	case "revoke":
+		if len(args) < 2 {
+			return fmt.Errorf("usage: xxdrive share revoke <tokenOrHash>")
+		}
+		id := args[1]
+		if len(id) > 16 {
+			// Raw capability tokens are stored hashed; the revoke endpoint
+			// matches on the first 16 hex chars of sha256(token) — the same
+			// derivation the server applies when creating the share.
+			sum := sha256.Sum256([]byte(id))
+			id = hex.EncodeToString(sum[:])[:16]
+		}
+		if _, err := doJSON("DELETE", c.BaseURL+"/api/shares/"+url.PathEscape(id), c.Token, nil); err != nil {
+			return err
+		}
+		fmt.Println("share revoked")
+	default:
+		return fmt.Errorf("unknown share subcommand %q", args[0])
+	}
+	return nil
+}
+
+func cmdSearch(args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: xxdrive search <query>")
+	}
+	c, err := loadCfg()
+	if err != nil {
+		return err
+	}
+	var ents []entry
+	if err := getInto(c, "/api/search?q="+urlEscape(strings.Join(args, " ")), &ents); err != nil {
+		return err
+	}
+	printEntries(ents, true)
+	return nil
+}
+
+func cmdStarToggle(args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: xxdrive star <path>")
+	}
+	c, err := loadCfg()
+	if err != nil {
+		return err
+	}
+	out, err := doJSON("POST", c.BaseURL+"/api/star/toggle", c.Token, map[string]string{"path": args[0]})
+	if err != nil {
+		return err
+	}
+	if on, _ := out["starred"].(bool); on {
+		fmt.Println("starred", args[0])
+	} else {
+		fmt.Println("unstarred", args[0])
+	}
+	return nil
+}
+
+func cmdStarred(args []string) error {
+	c, err := loadCfg()
+	if err != nil {
+		return err
+	}
+	var ents []entry
+	if err := getInto(c, "/api/starred", &ents); err != nil {
+		return err
+	}
+	printEntries(ents, true)
+	return nil
+}
+
+type sessionRow struct {
+	Label     string `json:"label"`
+	CreatedAt int64  `json:"createdAt"`
+	LastSeen  int64  `json:"lastSeen"`
+	ExpiresAt int64  `json:"expiresAt"`
+	Current   bool   `json:"current"`
+}
+
+func cmdSessions(args []string) error {
+	c, err := loadCfg()
+	if err != nil {
+		return err
+	}
+	if len(args) > 0 && args[0] == "revoke-others" {
+		out, err := doJSON("POST", c.BaseURL+"/api/auth/sessions/revoke-others", c.Token, nil)
+		if err != nil {
+			return err
+		}
+		n, _ := out["revoked"].(float64)
+		fmt.Printf("revoked %d other session(s)\n", int(n))
+		return nil
+	}
+	var rows []sessionRow
+	if err := getInto(c, "/api/auth/sessions", &rows); err != nil {
+		return err
+	}
+	for _, s := range rows {
+		mark := " "
+		if s.Current {
+			mark = "*"
+		}
+		fmt.Printf("%s %-24s last-seen %s expires %s\n", mark, s.Label,
+			time.Unix(s.LastSeen, 0).Format("2006-01-02 15:04"),
+			time.Unix(s.ExpiresAt, 0).Format("2006-01-02"))
+	}
+	return nil
+}
+
+// ---------- array/stream response helpers ----------
+
+// authedGet issues an authorized GET and returns the raw body. Bare JSON
+// arrays (trash, versions, search, shares, sessions) cannot go through
+// doJSON, which only decodes objects.
+func authedGet(c *config, path string) ([]byte, error) {
+	req, err := http.NewRequest("GET", c.BaseURL+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("GET %s: HTTP %d: %s", path, resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	return data, nil
+}
+
+// getInto GETs path and json-decodes the body into dst.
+func getInto(c *config, path string, dst any) error {
+	data, err := authedGet(c, path)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(data, dst)
+}
+
+// fetchBinary streams an authorized GET to dest ("-": stdout), staging through
+// a .xxpart file for atomic writes when dest is a real path.
+func fetchBinary(c *config, path, dest string) (int64, error) {
+	req, err := http.NewRequest("GET", c.BaseURL+path, nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		io.Copy(io.Discard, resp.Body)
+		return 0, fmt.Errorf("GET %s: HTTP %d", path, resp.StatusCode)
+	}
+	if dest == "-" {
+		return io.Copy(os.Stdout, resp.Body)
+	}
+	tmp := dest + ".xxpart"
+	f, err := os.Create(tmp)
+	if err != nil {
+		return 0, err
+	}
+	n, cpErr := io.Copy(f, resp.Body)
+	clErr := f.Close()
+	if cpErr != nil || clErr != nil {
+		os.Remove(tmp)
+		if cpErr != nil {
+			return 0, cpErr
+		}
+		return 0, clErr
+	}
+	if err := os.Rename(tmp, dest); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// printEntries renders entries in the ls table style. fullPath swaps the name
+// column for the drive-relative path (search/starred results span folders).
+func printEntries(ents []entry, fullPath bool) {
+	sort.Slice(ents, func(i, j int) bool {
+		if ents[i].IsDir != ents[j].IsDir {
+			return ents[i].IsDir
+		}
+		return ents[i].Path < ents[j].Path
+	})
+	for _, e := range ents {
+		kind := "f"
+		if e.IsDir {
+			kind = "d"
+		}
+		name := e.Name
+		if fullPath {
+			name = e.Path
+		}
+		star := ""
+		if e.Starred {
+			star = " *"
+		}
+		fmt.Printf("%s %10d %s %s%s\n", kind, e.Size,
+			time.Unix(e.Mtime, 0).Format("2006-01-02 15:04"), name, star)
+	}
+}
+
 // ---------- transfer primitives ----------
 
-func uploadFile(c *config, localPath, remotePath string, conflictRename bool) (map[string]any, error) {
+func uploadFile(c *config, localPath, remotePath, ifMatch string, conflictRename bool) (map[string]any, error) {
 	f, err := os.Open(localPath)
 	if err != nil {
 		return nil, err
@@ -421,6 +910,12 @@ func uploadFile(c *config, localPath, remotePath string, conflictRename bool) (m
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	req.Header.Set("X-Device", hostTag())
+	if ifMatch != "" {
+		// Optimistic concurrency: the server compares this against its
+		// current weak etag (fsdrv.EtagOf) and answers 412 on mismatch,
+		// leaving the stored bytes untouched.
+		req.Header.Set("If-Match", ifMatch)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err

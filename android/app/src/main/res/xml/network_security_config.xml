@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Main (release-shaped) network policy: NO cleartext HTTP anywhere.
+  The debug source set overrides THIS ENTIRE FILE with an allow variant,
+  because the server address is user-entered plain-HTTP LAN
+  (http://192.168.x.x) and NSC cannot express IP-range wildcards.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

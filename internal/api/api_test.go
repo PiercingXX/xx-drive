@@ -22,12 +22,17 @@ type testEnv struct {
 	t       *testing.T
 	st      *store.Store
 	fs      *fsdrv.Driver
-	srv     *httptest.Server
+	srv     *Server
+	srvr    *httptest.Server
 	client  *http.Client
 	baseURL string
 }
 
 func newTestEnv(t *testing.T) *testEnv {
+	return newTestEnvWithCfg(t, nil)
+}
+
+func newTestEnvWithCfg(t *testing.T, mutate func(*Config)) *testEnv {
 	t.Helper()
 	dir := t.TempDir()
 	st, err := store.Open(filepath.Join(dir, "test.db"))
@@ -39,13 +44,16 @@ func newTestEnv(t *testing.T) *testEnv {
 		t.Fatal(err)
 	}
 	cfg := Config{Addr: ":0", MaxUploadMB: 8, SessionTTL: time.Hour, TrashRetentionDays: 30}
+	if mutate != nil {
+		mutate(&cfg)
+	}
 	s := New(cfg, st, fsd, nil)
 	ts := httptest.NewServer(s.Handler())
 	t.Cleanup(func() {
 		ts.Close()
 		st.Close()
 	})
-	return &testEnv{t: t, st: st, fs: fsd, srv: ts, client: ts.Client(), baseURL: ts.URL}
+	return &testEnv{t: t, st: st, fs: fsd, srv: s, srvr: ts, client: ts.Client(), baseURL: ts.URL}
 }
 
 func (e *testEnv) req(method, path, token string, body io.Reader, hdr map[string]string) (*http.Response, []byte) {
@@ -397,6 +405,33 @@ func TestAdminAndIsolation(t *testing.T) {
 	if resp.StatusCode != 401 {
 		t.Fatalf("disabled user session should die, got %d", resp.StatusCode)
 	}
+
+	// cannot delete an enabled account (or yourself)
+	resp, b = postJSON(env, adminTok, "/api/admin/users/delete", map[string]any{"username": "alice"})
+	if resp.StatusCode != 400 {
+		t.Fatalf("delete enabled user: %d %s", resp.StatusCode, b)
+	}
+	resp, b = postJSON(env, adminTok, "/api/admin/users/delete", map[string]any{"username": "root"})
+	if resp.StatusCode != 400 {
+		t.Fatalf("delete self: %d %s", resp.StatusCode, b)
+	}
+
+	// disable-then-delete reclaims the on-disk tree
+	bobFile := filepath.Join(env.fs.Root(), "files", "bob", "bobs-secret.txt")
+	if _, err := os.Stat(bobFile); err != nil {
+		t.Fatalf("bob file missing before delete: %v", err)
+	}
+	resp, b = postJSON(env, adminTok, "/api/admin/users/delete", map[string]any{"username": "bob"})
+	if resp.StatusCode != 200 {
+		t.Fatalf("delete bob: %d %s", resp.StatusCode, b)
+	}
+	if _, err := os.Stat(bobFile); !os.IsNotExist(err) {
+		t.Fatalf("bob files still on disk after delete: %v", err)
+	}
+	resp, listed := env.req("GET", "/api/admin/users", adminTok, nil, nil)
+	if resp.StatusCode != 200 || strings.Contains(string(listed), `"username":"bob"`) {
+		t.Fatalf("bob still in user list: %s", listed)
+	}
 }
 
 func TestSearchStarsEventsZip(t *testing.T) {
@@ -453,6 +488,40 @@ func TestPWAAssetsServed(t *testing.T) {
 	if resp.StatusCode != 200 {
 		t.Fatalf("healthz: %d", resp.StatusCode)
 	}
+}
+
+func TestSelfServicePasswordChange(t *testing.T) {
+	env := newTestEnv(t)
+	tok := env.mkUser("carol")
+
+	// wrong current password → 401, password untouched
+	resp, _ := postJSON(env, tok, "/api/auth/password",
+		map[string]string{"current_password": "wrong-pass", "new_password": "newpass123"})
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("wrong current password: want 401, got %d", resp.StatusCode)
+	}
+
+	// too-short new password → same rule as admin-set passwords
+	resp, _ = postJSON(env, tok, "/api/auth/password",
+		map[string]string{"current_password": "password123", "new_password": "short"})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("short new password: want 400, got %d", resp.StatusCode)
+	}
+
+	// correct current password → 200 {}
+	resp, b := postJSON(env, tok, "/api/auth/password",
+		map[string]string{"current_password": "password123", "new_password": "newpass123"})
+	if resp.StatusCode != 200 || strings.TrimSpace(string(b)) != "{}" {
+		t.Fatalf("change: want 200 {}, got %d %s", resp.StatusCode, b)
+	}
+
+	// old credential is dead; the new one logs in
+	body, _ := json.Marshal(map[string]string{"username": "carol", "password": "password123"})
+	resp, _ = env.req("POST", "/api/auth/login", "", bytes.NewReader(body), jsonHdr())
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("old password still valid: got %d", resp.StatusCode)
+	}
+	env.login("carol", "newpass123")
 }
 
 var _ = os.Getenv // keep os import if unused by future edits

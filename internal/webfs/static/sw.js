@@ -1,7 +1,14 @@
 /* xx-drive service worker: app-shell caching only.
-   API calls are never cached (always live). */
-const CACHE = 'xxdrive-shell-v1';
-const SHELL = ['/', '/index.html', '/manifest.webmanifest'];
+   API calls are never cached (always live).
+
+   Cache rotation protocol: bump CACHE to 'xxdrive-shell-v<N+1>' on EVERY
+   deploy that changes any JS/CSS asset. The activate handler deletes
+   caches from old versions, and the stale-while-revalidate fetch handler
+   then repopulates from network — without a bump, a cached shell can keep
+   serving an old /app.js that 404s against new server routes. */
+const CACHE = 'xxdrive-shell-v2';
+const SHELL = ['/', '/index.html', '/manifest.webmanifest', '/app.js', '/style.css',
+  '/assets/icon.svg'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));

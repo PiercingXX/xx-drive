@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  DEBUG ONLY: plain HTTP allowed everywhere so LAN testing against
+  user-entered servers (http://192.168.x.x) keeps working. Release builds use
+  the main variant of this file, which denies cleartext outright.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
