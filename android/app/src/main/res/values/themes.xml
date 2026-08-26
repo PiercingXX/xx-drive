@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
+<resources xmlns:tools="http://schemas.android.com/tools">
     <!-- PiercingXX brand: AMOLED Ink ground, Signal white as the single accent,
          monospace type (JetBrains Mono body via @font/font_body alias). -->
-    <style name="Theme.XXDrive" parent="Theme.Material3.DayNight.NoActionBar">
+    <style name="Theme.XXDrive" parent="Theme.Material3.DayNight.NoActionBar" tools:targetApi="31">
         <item name="colorPrimary">@color/pxx_signal</item>
         <item name="colorAccent">@color/pxx_signal</item>
         <item name="colorOnPrimary">@color/pxx_ink</item>
@@ -13,5 +13,17 @@
         <item name="android:fontFamily">@font/font_body</item>
         <item name="android:textColorPrimary">@color/pxx_white_90</item>
         <item name="android:textColorSecondary">@color/pxx_white_50</item>
+
+        <!-- The Android 12+ starting window, drawn before LoginActivity exists.
+             The platform always shows one; its defaults put the launcher icon
+             on a theme-derived ground, so the app announced itself with a mark
+             the brand does not use. Ink ground and a transparent icon make it
+             the same black the login screen opens on. The icon-background and
+             branding slots are the platform's other two ways to draw a mark, so
+             they are pinned shut rather than left to inherit. -->
+        <item name="android:windowSplashScreenBackground">@color/pxx_ink</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@android:color/transparent</item>
+        <item name="android:windowSplashScreenIconBackgroundColor">@android:color/transparent</item>
+        <item name="android:windowSplashScreenBrandingImage">@null</item>
     </style>
 </resources>
