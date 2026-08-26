@@ -28,7 +28,7 @@ weight of a PHP/container stack (`README.md`).
   `todo.md` and the README Status section as the source of truth for what
   is proven vs pending — not the old audit verdict.
 - **Estate placement.** Per the constellation map
-  (`/media/Working-Storage/GitHub/Skippy-Project/Notes.md`), xx-drive will
+  (`/media/Working-Storage/GitHub/Skippy-Project/AGENTS.md`), xx-drive will
   run **on the skippy-tel-network fabric**, single-node on Dutchman for
   now. It is not yet wired into an `AddonSpec` — see §7.
 - **The safety-net triad.** The design goal, stated in the README, is
@@ -194,12 +194,12 @@ File content itself never touches SQLite. Under the data root:
 
 ```
 <data-dir>/
-  xxdrive.db SQLite WAL metadata (users/sessions/shares/stars/events/versions/etags)
-  files/<username>/... each user's drive tree — plain files, rsync-friendly
-  trash/<username>/<id>/ soft-deleted payload (file or whole directory)
-  trash/<username>/<id>.json {origPath, name, isDir, deletedAt}
-  versions/<user>/<sha256(logicalPath)>/<versionID> prior content of a file (max 32 kept per path)
-  tmp/ staging dir for atomic uploads (.xxpart-style temp + rename)
+  xxdrive.db              SQLite WAL metadata (users/sessions/shares/stars/events/versions/etags)
+  files/<username>/...    each user's drive tree — plain files, rsync-friendly
+  trash/<username>/<id>/       soft-deleted payload (file or whole directory)
+  trash/<username>/<id>.json   {origPath, name, isDir, deletedAt}
+  versions/<user>/<sha256(logicalPath)>/<versionID>   prior content of a file (max 32 kept per path)
+  tmp/                     staging dir for atomic uploads (.xxpart-style temp + rename)
 ```
 
 `internal/fsdrv.New` creates `files/ trash/ versions/ tmp/` under the
@@ -213,8 +213,8 @@ builds with `CGO_ENABLED=0`, correct for that driver). The CLI is a
 separate binary, `cmd/xxdrive-cli` → `xxdrive-cli`.
 
 ```bash
-go build -o xxdrive-server./cmd/xxdrive-server
-go build -o xxdrive-cli./cmd/xxdrive-cli
+go build -o xxdrive-server ./cmd/xxdrive-server
+go build -o xxdrive-cli    ./cmd/xxdrive-cli
 ```
 
 **Port / bind:** default listen address is `:8080` (all interfaces), but
@@ -258,7 +258,7 @@ instead of hand-editing the unit:
 
 - `XXD_TLS_CERT` + `XXD_TLS_KEY` → `-tls-cert/-tls-key` (server does TLS itself)
 - `XXD_SECURE_COOKIES=1` → `-secure-cookies` (use when TLS terminates at a proxy)
-- `FABRIC_CLUSTER_KEYS_PATH=/path/keyring.json` → `-keyring...` (estate SSO)
+- `FABRIC_CLUSTER_KEYS_PATH=/path/keyring.json` → `-keyring ...` (estate SSO)
 - `XXD_ADMIN_PASSWORD=...` → written to root-only `/etc/default/xxdrive`
   (loaded via `EnvironmentFile`) for a known first-boot password; delete
   it after first login.
@@ -331,7 +331,7 @@ index). Either:
 # Consistent online snapshot (recommended):
 sqlite3 /var/lib/xxdrive/xxdrive.db ".backup '/backups/xxdrive-backup.db'"
 
-#...or stop the unit and copy cold:
+# ...or stop the unit and copy cold:
 systemctl stop xxdrive && cp -a /var/lib/xxdrive/xxdrive.db /backups/ && systemctl start xxdrive
 ```
 
@@ -420,7 +420,7 @@ never locked out and a box with no keyring configured is still fully usable.
 The design centers on the OWASP file-storage threat set. Auth
 enforcement (401 on unauthenticated API), traversal blocking (raw `../`
 and percent-encoded `%2f`/`%2e` forms), wrong-password rejection, and
-share containment are all covered by the Go test suite (`go test./...`
+share containment are all covered by the Go test suite (`go test ./...`
 — api, fabric, fsdrv, store, token, cli sync matrix). No auth bypass,
 path traversal, injection, committed secret, or unsafe default
 credential is known in the current code; what remains *unproven* is the
@@ -545,11 +545,11 @@ importantly — the pending on-phone smoke list for the Android client.
 endpoint in `docs/API.md`):
 
 ```
-login <url> <user> whoami sessions [revoke-others]
-logout ls / mkdir / rm / mv / cp trash ls|restore|delete|empty
-up [--if-match ETAG] down versions ls|restore|get
-share ls|create|revoke search <query> star <path> / starred
-sync <localDir> <remoteDir> watch <localDir> <remoteDir> [-interval N]
+login <url> <user>            whoami                        sessions [revoke-others]
+logout                        ls / mkdir / rm / mv / cp     trash ls|restore|delete|empty
+up [--if-match ETAG]          down                          versions ls|restore|get
+share ls|create|revoke        search <query>                star <path> / starred
+sync <localDir> <remoteDir>   watch <localDir> <remoteDir> [-interval N]
 ```
 
 Notable behaviors: `up` defaults to overwrite+version (prior content is
@@ -595,7 +595,7 @@ the source, not a completed deployment.
   external cron.
 - **If wired as a Skippy `AddonSpec`:** declare
   port/entrypoint/health/`data_dir` there **and** update the
-  constellation `Notes.md` in the same change, per the estate's
+  constellation `AGENTS.md` in the same change, per the estate's
   cross-repo contract rule at the top of that file. Neither has
   happened yet as of this manual — xx-drive is validated and documented
   but not yet an add-on.
@@ -635,7 +635,7 @@ the source, not a completed deployment.
   the server-side content changed since the client last read it (someone
   else, or another device, wrote first). Re-fetch and retry, or use
   `conflict=rename` if the intent is to keep both.
-- **CLI sync produces unexpected `(conflict from...)` copies.** This is
+- **CLI sync produces unexpected `(conflict from ...)` copies.** This is
   working as designed whenever the same path changed on both sides
   since the last successful sync — both versions are kept deliberately,
   never overwritten; both sides then converge on the canonical remote
