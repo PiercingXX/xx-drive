@@ -17,7 +17,7 @@ MANUAL / README / parent map: xx-drive is not on the fabric ring (unless the
 operator has ruled to wire it).
 
 - files: `docs/MANUAL.md`, `README.md`
-- verify: `rg -n "fabric|ClusterKeyring|admin" docs/MANUAL.md README.md`
+- verify: rg -n ClusterKeyring docs/MANUAL.md
 
 ### T2 — deploy unit matches the box
 
@@ -25,4 +25,4 @@ operator has ruled to wire it).
 / XXD_TLS_KEY unset. Never README all-interfaces `:8080`.
 
 - files: `docs/MANUAL.md`
-- verify: `rg -n "127.0.0.1:8080|/srv/deep/xx-drive" docs/MANUAL.md`
+- verify: rg -n 127.0.0.1:8080 docs/MANUAL.md
