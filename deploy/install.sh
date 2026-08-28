@@ -16,6 +16,12 @@
 #   XXD_ADMIN_PASSWORD            known password for the first-boot admin user.
 #                                 Written root-only to /etc/default/xxdrive;
 #                                 DELETE that entry after first login.
+#   XXD_DATA_DIR                  server data directory (SQLite + files/trash/
+#                                 versions/tmp). Defaults to the live box's ZFS
+#                                 pool path /srv/deep/xx-drive so install never
+#                                 creates a second data tree under /var/lib/xxdrive.
+#                                 The value is templated into the unit's -data flag
+#                                 and ReadWritePaths, so unit and data dir always agree.
 #
 # See deploy/Caddyfile.example / deploy/nginx.conf.example for TLS termination,
 # and the drop-in example printed at the end of a successful install.
@@ -26,6 +32,11 @@ if [[ -z "$BASE_URL" ]]; then
   echo "usage: $0 https://drive.example.com"
   exit 1
 fi
+
+# Server data directory. Defaults to the live box's ZFS pool path so this
+# install never creates a second data tree. The value is templated into the
+# unit's -data flag and ReadWritePaths below.
+DATA_DIR="${XXD_DATA_DIR:-/srv/deep/xx-drive}"
 
 # Build (requires Go >= 1.25; go.mod pins go 1.25.0) or use a prebuilt binary
 # placed next to this script.
@@ -41,9 +52,9 @@ else
 fi
 
 echo "==> creating service user"
-useradd --system --home-dir /var/lib/xxdrive --shell /usr/sbin/nologin xxdrive 2>/dev/null || true
-mkdir -p /var/lib/xxdrive
-chown xxdrive:xxdrive /var/lib/xxdrive
+useradd --system --home-dir "$DATA_DIR" --shell /usr/sbin/nologin xxdrive 2>/dev/null || true
+mkdir -p "$DATA_DIR"
+chown xxdrive:xxdrive "$DATA_DIR"
 
 echo "==> installing binaries + unit"
 install -m 0755 /tmp/xxdrive-server /usr/local/bin/xxdrive-server
@@ -63,7 +74,8 @@ fi
 if [[ -n "${FABRIC_CLUSTER_KEYS_PATH:-}" ]]; then
   EXTRA_FLAGS+=" -keyring ${FABRIC_CLUSTER_KEYS_PATH}"
 fi
-sed "s|https://CHANGE-ME.example.com|${BASE_URL}|g" deploy/xxdrive.service > /etc/systemd/system/xxdrive.service
+sed -e "s|https://CHANGE-ME.example.com|${BASE_URL}|g" \
+    -e "s|/srv/deep/xx-drive|${DATA_DIR}|g" deploy/xxdrive.service > /etc/systemd/system/xxdrive.service
 if [[ -n "$EXTRA_FLAGS" ]]; then
   sed -i "s|^ExecStart=.*$|&${EXTRA_FLAGS}|" /etc/systemd/system/xxdrive.service
 fi
@@ -91,7 +103,7 @@ systemctl enable --now xxdrive
 sleep 1
 systemctl --no-pager status xxdrive | head -12
 
-cat <<'NOTE'
+cat <<NOTE
 
 === Installation complete ===
 
@@ -106,7 +118,7 @@ First start: if no admin existed, one was created.
 Lost the admin password later? Reset it (prompts twice, no echo):
 
       systemctl stop xxdrive
-      sudo -u xxdrive xxdrive-server -data /var/lib/xxdrive -passwd admin
+      sudo -u xxdrive xxdrive-server -data ${DATA_DIR} -passwd admin
       systemctl start xxdrive
 
 TLS: this unit serves plain HTTP on 127.0.0.1:8080. Either terminate TLS at a
@@ -117,7 +129,7 @@ reverse proxy (deploy/Caddyfile.example or deploy/nginx.conf.example) AND add
         [Service]
         ExecStart=
         ExecStart=/usr/local/bin/xxdrive-server -addr 127.0.0.1:8080 \
-          -data /var/lib/xxdrive -base-url https://drive.example.com \
+          -data ${DATA_DIR} -base-url https://drive.example.com \
           -secure-cookies
 
 ...or re-run this script with XXD_TLS_CERT/XXD_TLS_KEY to have the server do
