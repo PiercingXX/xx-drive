@@ -20,5 +20,9 @@ android/.idea/
 # Skippy runtime bookkeeping — never tracked
 .skippy/
 
+# Local toolchain shim dir (workspace_child_env prepends .venv/bin to the gate
+# PATH; the go shim there delegates to bin/go). Never tracked.
+.venv/
+
 # Local go build cache (used when the sandbox's default GOCACHE is read-only)
 .gocache/
