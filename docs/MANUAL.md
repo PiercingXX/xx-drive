@@ -24,9 +24,10 @@ weight of a PHP/container stack (`README.md`).
   surfaced real P0 bugs (CLI sync clobbering local edits, non-atomic
   trash, username `..` escape, broken folder shares, unwired Android
   auth). Those P0s are **now fixed with tests**, but none of it has been
-  exercised on a real phone yet, and the project is not deployed. Treat
-  `todo.md` and the README Status section as the source of truth for what
-  is proven vs pending — not the old audit verdict.
+  exercised on a real phone yet. The server is stood up on the live node
+  (see §7); what remains unproven is the Android client on a physical
+  device. Treat `todo.md` and the README Status section as the source of
+  truth for what is proven vs pending — not the old audit verdict.
 - **Estate placement.** Per the constellation map
   (`/media/Working-Storage/GitHub/Skippy-Project/AGENTS.md`), xx-drive runs
   **on the skippy-tel-network fabric**, single-node on Dutchman. It is
