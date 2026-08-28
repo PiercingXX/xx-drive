@@ -24,13 +24,15 @@ weight of a PHP/container stack (`README.md`).
   surfaced real P0 bugs (CLI sync clobbering local edits, non-atomic
   trash, username `..` escape, broken folder shares, unwired Android
   auth). Those P0s are **now fixed with tests**, but none of it has been
-  exercised on a real phone yet, and the project is not deployed. Treat
-  `todo.md` and the README Status section as the source of truth for what
-  is proven vs pending — not the old audit verdict.
+  exercised on a real phone yet. The server is stood up on the live node
+  (see §7); what remains unproven is the Android client on a physical
+  device. Treat `todo.md` and the README Status section as the source of
+  truth for what is proven vs pending — not the old audit verdict.
 - **Estate placement.** Per the constellation map
-  (`/media/Working-Storage/GitHub/Skippy-Project/AGENTS.md`), xx-drive will
-  run **on the skippy-tel-network fabric**, single-node on Dutchman for
-  now. It is not yet wired into an `AddonSpec` — see §7.
+  (`/media/Working-Storage/GitHub/Skippy-Project/AGENTS.md`), xx-drive runs
+  **on the skippy-tel-network fabric**, single-node on Dutchman. It is
+  deployed via the systemd unit in `deploy/` with its data on the ZFS pool
+  at `/srv/deep/xx-drive` — see §7.
 - **The safety-net triad.** The design goal, stated in the README, is
   "never data loss": soft-delete trash + file versioning + conflict
   copies, on every write path, always. Share links (password/expiry),
@@ -233,18 +235,21 @@ required, registered first in `routes()`). **This is `/healthz`,
 matching radio's convention — NOT jal's `/api/health`.**
 
 **Data dir:** `-data` flag / `XXD_DATA_DIR` env, default `./data` for a
-dev run. The systemd unit uses `/var/lib/xxdrive`. Per the constellation
-map's precedent (jal's data dir), xx-drive's data dir should live on the
-**ZFS pool**, not the install directory, once it's actually stood up —
-this manual does not assert that placement has happened yet.
+dev run. The systemd unit uses `/srv/deep/xx-drive` — the live box's ZFS
+pool, matching the constellation map's precedent (jal's data dir) rather
+than the install directory. `install.sh` defaults `XXD_DATA_DIR` to this
+path and templates it into the unit's `-data` flag and `ReadWritePaths`,
+so the unit and the data dir always agree and an install never creates a
+second data tree.
 
 **systemd unit** (`deploy/xxdrive.service`): runs as a dedicated
-`xxdrive` system user, `StateDirectory=xxdrive`, binds
-`127.0.0.1:8080`, `Restart=on-failure` / `RestartSec=5`. Hardening flags
-present: `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`,
-`PrivateTmp`, `ReadWritePaths=/var/lib/xxdrive` (only),
-`ProtectKernelTunables`, `ProtectControlGroups`, `RestrictSUIDSGID`,
-`MemoryDenyWriteExecute`, `LockPersonality`.
+`xxdrive` system user, binds `127.0.0.1:8080`, `Restart=on-failure` /
+`RestartSec=5`. Data lives at `/srv/deep/xx-drive` on the ZFS pool (not
+`StateDirectory`). Hardening flags present: `NoNewPrivileges`,
+`ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`,
+`ReadWritePaths=/srv/deep/xx-drive` (only), `ProtectKernelTunables`,
+`ProtectControlGroups`, `RestrictSUIDSGID`, `MemoryDenyWriteExecute`,
+`LockPersonality`.
 
 **Install script** (`deploy/install.sh`, run as root):
 `./install.sh https://drive.example.com` — builds both binaries (requires
@@ -298,7 +303,7 @@ as the API):
 
 ```bash
 systemctl stop xxdrive
-sudo -u xxdrive xxdrive-server -data /var/lib/xxdrive -passwd admin
+sudo -u xxdrive xxdrive-server -data /srv/deep/xx-drive -passwd admin
 systemctl start xxdrive
 ```
 
@@ -329,10 +334,10 @@ index). Either:
 
 ```bash
 # Consistent online snapshot (recommended):
-sqlite3 /var/lib/xxdrive/xxdrive.db ".backup '/backups/xxdrive-backup.db'"
+sqlite3 /srv/deep/xx-drive/xxdrive.db ".backup '/backups/xxdrive-backup.db'"
 
 # ...or stop the unit and copy cold:
-systemctl stop xxdrive && cp -a /var/lib/xxdrive/xxdrive.db /backups/ && systemctl start xxdrive
+systemctl stop xxdrive && cp -a /srv/deep/xx-drive/xxdrive.db /backups/ && systemctl start xxdrive
 ```
 
 Either way, back up the content directories too — they are plain files,
@@ -539,7 +544,7 @@ importantly — the pending on-phone smoke list for the Android client.
 |---|---|---|
 | Web UI | Session cookie (`xxd_session`, HttpOnly, SameSite=Lax) set by `POST /api/auth/login` | Served by the same binary at `/`; every write goes through `authedMutating`'s same-origin CSRF check since it's cookie-based. |
 | Linux CLI (`xxdrive-cli`) | Bearer token, saved to `~/.config/xxdrive/config.json` (mode `0600`) after `xxdrive login <url> <user>` | `Authorization: Bearer <token>` header on every request; exempt from the CSRF same-origin check (no ambient cookie). `X-Client: cli` on login labels the session `cli:<ip>` in the sessions list. |
-| Android app | Bearer token from `LoginActivity`, stored in plain `SharedPreferences` (`Session.kt`) — **hardening TODO, not yet done**: switch to `EncryptedSharedPreferences`. The token is also injected into the WebView as the `xxd_session` cookie before first load, so cookie-authenticated SPA requests work natively. | WebView hosts the server's own PWA at the configured base URL. Same-origin `GET/HEAD /api/*` WebView requests are additionally re-proxied with `Authorization: Bearer`; POST/XHR uploads ride the injected session cookie. Native bridges (file-picker upload, `DownloadManager` downloads with bearer+cookie headers, `PhotoUploadWorker` camera backup) call the same `/api/*` endpoints. `usesCleartextTraffic="true"` is on by default for LAN/dev testing — remove for a production HTTPS deployment. **On-phone smoke still pending** (§2.4). |
+| Android app | Bearer token from `LoginActivity`, stored in `EncryptedSharedPreferences` (`Session.kt`, AES256-GCM under an Android Keystore `MasterKey`; construction auto-recovers once by deleting a corrupt or legacy plaintext pref file). The token is also injected into the WebView as the `xxd_session` cookie before first load, so cookie-authenticated SPA requests work natively. | WebView hosts the server's own PWA at the configured base URL. Same-origin `GET/HEAD /api/*` WebView requests are additionally re-proxied with `Authorization: Bearer`; POST/XHR uploads ride the injected session cookie. Native bridges (file-picker upload, `DownloadManager` downloads with bearer+cookie headers, `PhotoUploadWorker` camera backup) call the same `/api/*` endpoints. `usesCleartextTraffic="true"` is on by default for LAN/dev testing — remove for a production HTTPS deployment. **On-phone smoke still pending** (§2.4). |
 
 **Full CLI verb list** (`xxdrive help`; every verb maps to a documented
 endpoint in `docs/API.md`):
@@ -566,8 +571,9 @@ writing this manual — the two agree.
 
 ## 7. Running on skippy-tel-network
 
-Not yet stood up — this section documents the shape, per the source and
-the source, not a completed deployment.
+xx-drive is stood up on the skippy-tel-network fabric, single-node on
+Dutchman, via the systemd unit in `deploy/` with its data on the ZFS pool
+at `/srv/deep/xx-drive`:
 
 - **Binary/entrypoint:** `cmd/xxdrive-server` → single static binary,
   cross-compilable (`CGO_ENABLED=0`, pure-Go SQLite driver) — a good fit
@@ -583,11 +589,11 @@ the source, not a completed deployment.
   `/healthz` (radio's convention), **not** `/api/health` (jal's).
   Unauthenticated by design — if you care about fingerprinting, have the
   proxy restrict `/healthz` to private ranges (both example configs do).
-- **Data dir:** put it on the ZFS pool, same precedent as jal's data
-  dir — `xxdrive.db` (SQLite WAL, metadata only, rebuildable except
-  users/sessions) plus `files/ trash/ versions/ tmp/` (plain files,
-  rsync-friendly, so it also plays nicely with the estate's Synology
-  backup mesh per the federated-backup doctrine).
+- **Data dir:** `/srv/deep/xx-drive` on the ZFS pool, same precedent as
+  jal's data dir — `xxdrive.db` (SQLite WAL, metadata only, rebuildable
+  except users/sessions) plus `files/ trash/ versions/ tmp/` (plain
+  files, rsync-friendly, so it also plays nicely with the estate's
+  Synology backup mesh per the federated-backup doctrine).
 - **First run:** capture the one-time admin password from the service
   log (or set `XXD_ADMIN_PASSWORD` up front) and change it via the web
   UI's admin panel immediately.
@@ -596,20 +602,20 @@ the source, not a completed deployment.
 - **If wired as a Skippy `AddonSpec`:** declare
   port/entrypoint/health/`data_dir` there **and** update the
   constellation `AGENTS.md` in the same change, per the estate's
-  cross-repo contract rule at the top of that file. Neither has
-  happened yet as of this manual — xx-drive is validated and documented
-  but not yet an add-on.
+  cross-repo contract rule at the top of that file. As of this manual
+  xx-drive is validated and documented; wiring it as an add-on is the
+  remaining integration step.
 
 ## 8. Troubleshooting
 
 - **Server won't start / "create data dir" fatal.** The process needs
   write permission on the `-data`/`XXD_DATA_DIR` path (it calls
   `os.MkdirAll(dataDir, 0o700)`); under systemd this is
-  `/var/lib/xxdrive`, owned by the `xxdrive` service user created by
+  `/srv/deep/xx-drive`, owned by the `xxdrive` service user created by
   `install.sh`.
 - **Lost the one-time admin password.** Reset it with the built-in
   recovery mode (§3): stop the unit, run
-  `sudo -u xxdrive xxdrive-server -data /var/lib/xxdrive -passwd <user>`,
+  `sudo -u xxdrive xxdrive-server -data /srv/deep/xx-drive -passwd <user>`,
   enter the new password twice (no echo), start the unit again. The
   journal scrape (`journalctl -u xxdrive | grep "created admin user" -A4`)
   still works if the original password hasn't scrolled out of the log.
