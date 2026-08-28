@@ -16,3 +16,6 @@ android/.idea/
 # OS / editor noise
 .DS_Store
 *.swp
+
+# Skippy runtime bookkeeping — never tracked
+.skippy/
