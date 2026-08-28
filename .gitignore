@@ -19,3 +19,6 @@ android/.idea/
 
 # Skippy runtime bookkeeping — never tracked
 .skippy/
+
+# Local go build cache (used when the sandbox's default GOCACHE is read-only)
+.gocache/
