@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Wrapper that runs the Go 1.25.0 toolchain from the Go module cache with a
+# writable GOCACHE. The sandbox has no `go` on PATH and the default build
+# cache is read-only, so this execs the pinned toolchain and points GOCACHE
+# at the repo-local `.gocache` (gitignored). Keeps `go test ./...` runnable
+# in the sandbox without a system Go install.
+set -euo pipefail
+
+# Repo root = parent of this script's directory.
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Toolchain binary pinned by go.mod (go 1.25.0).
+GO_TOOLCHAIN="/home/piercingxx/go/pkg/mod/golang.org/toolchain@v0.0.1-go1.25.0.linux-amd64/bin/go"
+
+# Writable build cache, repo-local so it survives across commands and is
+# gitignored. Respect an explicitly-set GOCACHE.
+export GOCACHE="${GOCACHE:-$REPO_ROOT/.gocache}"
+mkdir -p "$GOCACHE"
+
+exec "$GO_TOOLCHAIN" "$@"

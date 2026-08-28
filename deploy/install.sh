@@ -41,6 +41,11 @@ DATA_DIR="${XXD_DATA_DIR:-/srv/deep/xx-drive}"
 # Build (requires Go >= 1.25; go.mod pins go 1.25.0) or use a prebuilt binary
 # placed next to this script.
 cd "$(dirname "$0")/.."
+# Prefer the repo's bin/go wrapper (execs the pinned module-cache toolchain
+# with a writable GOCACHE) when a system `go` isn't on PATH.
+if [[ -x bin/go && -z "$(command -v go 2>/dev/null || true)" ]]; then
+  PATH="$PWD/bin:$PATH"
+fi
 if command -v go >/dev/null 2>&1; then
   echo "==> building binaries"
   CGO_ENABLED=0 go build -o /tmp/xxdrive-server ./cmd/xxdrive-server
