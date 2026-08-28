@@ -10,7 +10,7 @@ Group=xxdrive
 # Data lives on the ZFS pool at /srv/deep/xx-drive (live box), not StateDirectory.
 # Optional env file (e.g. XXD_ADMIN_PASSWORD for first boot); missing file is fine.
 EnvironmentFile=-/etc/default/xxdrive
-ExecStart=/usr/local/bin/xxdrive-server -addr 127.0.0.1:8080 -data /srv/deep/xx-drive -base-url https://CHANGE-ME.example.com
+ExecStart=/usr/local/bin/xxdrive-server -addr 127.0.0.1:8080 -data /srv/deep/xx-drive -base-url https://CHANGE-ME.example.com -secure-cookies
 Restart=on-failure
 RestartSec=5
 
