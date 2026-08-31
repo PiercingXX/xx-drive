@@ -6,12 +6,8 @@
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
 
-    <!-- Family theme-sync. XX-Launcher sendBroadcast()s with this signature
-         permission; uses-permission is required to receive it. Declared here
-         too so install order against the launcher does not drop the grant. -->
-    <permission
-        android:name="com.piercingxx.xxlauncher.permission.THEME_SYNC"
-        android:protectionLevel="signature" />
+    <!-- Family theme-sync. XX-Launcher defines and sendBroadcast()s with this
+         signature permission; uses-permission is required to receive it. -->
     <uses-permission android:name="com.piercingxx.xxlauncher.permission.THEME_SYNC" />
 
     <application
