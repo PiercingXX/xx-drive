@@ -75,18 +75,18 @@ class PhotoUploadWorker(appContext: Context, params: WorkerParameters) :
         val proj = arrayOf(
             MediaStore.Images.Media._ID,
             MediaStore.Images.Media.DISPLAY_NAME,
-            MediaStore.Images.Media.DATE_TAKEN,
+            MediaStore.Images.Media.DATE_ADDED,
         )
         applicationContext.contentResolver.query(
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
             proj,
-            "${MediaStore.Images.Media.DATE_TAKEN} > ?",
-            arrayOf(since.toString()), // DATE_TAKEN is epoch milliseconds
-            "${MediaStore.Images.Media.DATE_TAKEN} ASC",
+            "${MediaStore.Images.Media.DATE_ADDED} > ?",
+            arrayOf(since.toString()), // DATE_ADDED is epoch seconds
+            "${MediaStore.Images.Media.DATE_ADDED} ASC",
         )?.use { cur ->
             val idCol = cur.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
             val nameCol = cur.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
-            val dateCol = cur.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_TAKEN)
+            val dateCol = cur.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_ADDED)
             while (cur.moveToNext()) {
                 val uri = android.content.ContentUris.withAppendedId(
                     MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cur.getLong(idCol))
