@@ -81,7 +81,7 @@ class PhotoUploadWorker(appContext: Context, params: WorkerParameters) :
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
             proj,
             "${MediaStore.Images.Media.DATE_ADDED} > ?",
-            arrayOf(since.toString()), // DATE_ADDED is epoch seconds
+            arrayOf((since / 1000).toString()), // DATE_ADDED is epoch seconds; since is epoch millis
             "${MediaStore.Images.Media.DATE_ADDED} ASC",
         )?.use { cur ->
             val idCol = cur.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
@@ -90,7 +90,9 @@ class PhotoUploadWorker(appContext: Context, params: WorkerParameters) :
             while (cur.moveToNext()) {
                 val uri = android.content.ContentUris.withAppendedId(
                     MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cur.getLong(idCol))
-                out.add(ImageItem(uri.toString(), cur.getString(nameCol), cur.getLong(dateCol)))
+                // DATE_ADDED is epoch seconds; keep dateTaken in millis so the
+                // watermark (KEY_LAST_TS) and Date() formatting stay consistent.
+                out.add(ImageItem(uri.toString(), cur.getString(nameCol), cur.getLong(dateCol) * 1000))
             }
         }
         return out
