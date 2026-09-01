@@ -5,6 +5,10 @@
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
+    <!-- setDestinationInExternalPublicDir writes to public Downloads; on
+         pre-scoped-storage devices (API <= 28) that needs WRITE_EXTERNAL_STORAGE. -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
 
     <!-- Family theme-sync. XX-Launcher defines and sendBroadcast()s with this
          signature permission; uses-permission is required to receive it. -->

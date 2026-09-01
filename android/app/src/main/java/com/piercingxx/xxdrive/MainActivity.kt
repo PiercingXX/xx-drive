@@ -86,8 +86,7 @@ class MainActivity : AppCompatActivity() {
                 setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
                 setTitle(name)
                 setMimeType(mimeType ?: "*/*")
-                setDestinationInExternalFilesDir(
-                    this@MainActivity,
+                setDestinationInExternalPublicDir(
                     android.os.Environment.DIRECTORY_DOWNLOADS,
                     name,
                 )
