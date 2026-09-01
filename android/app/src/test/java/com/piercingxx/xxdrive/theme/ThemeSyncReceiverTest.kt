@@ -67,10 +67,13 @@ class ThemeSyncReceiverTest {
         // The receiver demands the permission from any broadcaster...
         val receiverBlock = manifestText.substringAfter(".theme.ThemeSyncReceiver").substringBefore("</receiver>")
         assertTrue(receiverBlock.contains("android:permission=\"${ThemeSyncReceiver.PERMISSION_THEME_SYNC}\""))
-        // ...and the permission is declared in this manifest as signature-level.
-        val permBlock = manifestText.substringBefore("<application").substringAfter("<permission")
-        assertTrue(permBlock.contains(ThemeSyncReceiver.PERMISSION_THEME_SYNC))
-        assertTrue(permBlock.contains("protectionLevel=\"signature\""))
+        // ...and the app holds it via uses-permission. The permission itself is
+        // declared by the xx-launcher (its signature-level sender gate); xx-drive
+        // must NOT re-declare it — Android forbids two packages declaring the same
+        // permission unless they share a signing cert.
+        val preApplication = manifestText.substringBefore("<application")
+        assertTrue(preApplication.contains("<uses-permission android:name=\"${ThemeSyncReceiver.PERMISSION_THEME_SYNC}\""))
+        assertFalse(preApplication.contains("<permission"))
     }
 
     @Test

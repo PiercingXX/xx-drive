@@ -71,9 +71,11 @@ class ThemeSyncReceiver(
         const val ACTION_THEME_CHANGED = "xx.launcher.THEME_CHANGED"
 
         /**
-         * Custom signature-level permission gating sends to this receiver —
-         * declared in AndroidManifest.xml and required on the receiver there;
-         * only apps signed with our cert (the xx-launcher) can hold it.
+         * The xx-launcher's signature-level permission gating sends to this
+         * receiver. The permission is declared by the xx-launcher (the sender);
+         * xx-drive only holds it via <uses-permission> and requires it on the
+         * receiver. We must not re-declare it — Android forbids two packages
+         * declaring the same permission unless they share a signing cert.
          */
         const val PERMISSION_THEME_SYNC = "com.piercingxx.xxlauncher.permission.THEME_SYNC"
 
