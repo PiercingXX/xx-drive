@@ -26,3 +26,7 @@ android/.idea/
 
 # Local go build cache (used when the sandbox's default GOCACHE is read-only)
 .gocache/
+
+# Estate mill/audit scratch — never tracked
+.nagatha/
+.bilby/
