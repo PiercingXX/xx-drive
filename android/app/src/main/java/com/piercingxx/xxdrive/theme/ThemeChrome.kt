@@ -24,9 +24,8 @@ import com.piercingxx.xxdrive.R
  *
  * On the small native layouts (login, settings) it also flips text, hint, and
  * checkbox tints to the contrast-rule foreground so they stay legible on the
- * light grounds (Paper, Mist). NOTE: the WebView's page content is out of
- * scope — it keeps the server's own dark palette; only the native chrome
- * around it follows the family theme.
+ * light grounds (Paper, Mist). WebView/PWA file list stays server-dark; native
+ * chrome follows launcher.
  */
 object ThemeChrome {
 
@@ -81,7 +80,10 @@ object ThemeChrome {
                 view.setHintTextColor(withAlpha(foreground, 0x80))
                 view.backgroundTintList = ColorStateList.valueOf(foreground)
             }
-            view is TextView -> if (view.id != R.id.errorText) view.setTextColor(foreground)
+            view is TextView ->
+                if (view.id != R.id.errorText && view.id != R.id.backupErrorsText) {
+                    view.setTextColor(foreground)
+                }
         }
         if (view is ViewGroup) {
             for (i in 0 until view.childCount) tintTextTree(view.getChildAt(i), foreground)

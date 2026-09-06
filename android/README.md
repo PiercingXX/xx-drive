@@ -29,7 +29,9 @@ cd android
 Settings → *Auto-upload camera photos*. New photos in MediaStore are uploaded to
 `/Camera Uploads/<yyyy-MM-dd>/` every 30 minutes when the network constraint is
 met (Wi-Fi only by default). Conflicts never overwrite: uploads always use the
-server's `conflict=rename` mode.
+server's `conflict=rename` mode. Settings shows the last successful run, a
+metered / waiting-for-unmetered indicator while backup is enabled, and the last
+ten per-photo failures (name + message).
 
 ## Theme sync
 
@@ -41,10 +43,11 @@ Custom. The nine family apps all speak this contract — set the theme once in t
 launcher and the estate follows. Theme-sync, session, download names, and
 backup watermark are covered by JVM unit tests.
 
-**The WebView stays dark on every preset.** That is deliberate, not a bug: the
-page inside is the server's own web UI with its own palette, and repainting
-someone else's stylesheet from a broadcast is how you get unreadable text.
-Native chrome themes; page content does not.
+**WebView/PWA file list stays server-dark; native chrome follows launcher.**
+That is deliberate, not a bug: the page inside is the server's own web UI with
+its own palette, and injecting a CSS bridge from a theme broadcast is how you
+get unreadable text. Native chrome (login, settings, window bars) themes; the
+file list does not.
 
 ## Security notes
 

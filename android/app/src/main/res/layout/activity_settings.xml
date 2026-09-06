@@ -1,22 +1,37 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent" android:layout_height="match_parent"
-    android:orientation="vertical" android:padding="24dp">
-
-    <CheckBox android:id="@+id/autoBackupCheck"
-        android:layout_width="wrap_content" android:layout_height="wrap_content"
-        android:text="@string/auto_backup" />
-
-    <CheckBox android:id="@+id/wifiOnlyCheck"
-        android:layout_width="wrap_content" android:layout_height="wrap_content"
-        android:text="@string/wifi_only" android:layout_marginTop="8dp" />
-
-    <TextView android:id="@+id/lastBackupText"
+    android:fillViewport="true">
+    <LinearLayout
         android:layout_width="match_parent" android:layout_height="wrap_content"
-        android:layout_marginTop="8dp"
-        android:text="@string/backup_never" />
+        android:orientation="vertical" android:padding="24dp">
 
-    <Button android:id="@+id/logoutBtn"
-        android:layout_width="match_parent" android:layout_height="wrap_content"
-        android:text="@string/logout" android:layout_marginTop="32dp" />
-</LinearLayout>
+        <CheckBox android:id="@+id/autoBackupCheck"
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="@string/auto_backup" />
+
+        <CheckBox android:id="@+id/wifiOnlyCheck"
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="@string/wifi_only" android:layout_marginTop="8dp" />
+
+        <TextView android:id="@+id/lastBackupText"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="@string/backup_never" />
+
+        <TextView android:id="@+id/backupMeteredText"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:visibility="gone" />
+
+        <TextView android:id="@+id/backupErrorsText"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:textColor="@color/pxx_error"
+            android:visibility="gone" />
+
+        <Button android:id="@+id/logoutBtn"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="@string/logout" android:layout_marginTop="32dp" />
+    </LinearLayout>
+</ScrollView>

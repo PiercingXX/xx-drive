@@ -31,6 +31,7 @@ class PhotoUploadWorker(appContext: Context, params: WorkerParameters) :
         const val PREFS = "xxdrive_settings"
         const val KEY_LAST_TS = "last_photo_ts"
         const val KEY_LAST_SUCCESS_AT = "last_backup_success_at"
+        const val KEY_LAST_FAILURES = "last_backup_failures"
     }
 
     private val http = OkHttpClient()
@@ -57,20 +58,40 @@ class PhotoUploadWorker(appContext: Context, params: WorkerParameters) :
                 // Server creates parent folders automatically; conflict=rename never overwrites.
                 val target = "/Camera Uploads/$day/${item.name}"
                 uploadFile(item.path, target)
-                attempts.add(PhotoBackup.Attempt(item.dateTaken, uploaded = true))
+                attempts.add(
+                    PhotoBackup.Attempt(
+                        dateTaken = item.dateTaken,
+                        uploaded = true,
+                        uri = item.path,
+                        name = item.name,
+                    ),
+                )
             } catch (e: Exception) {
                 // Keep going through the batch. The watermark stops at the first
                 // failure, so this file (and everything after it) stays above it
                 // and the next run re-queries and retries it.
-                attempts.add(PhotoBackup.Attempt(item.dateTaken, uploaded = false))
+                attempts.add(
+                    PhotoBackup.Attempt(
+                        dateTaken = item.dateTaken,
+                        uploaded = false,
+                        uri = item.path,
+                        name = item.name,
+                        error = e.message ?: e.javaClass.simpleName,
+                    ),
+                )
             }
         }
         val next = PhotoBackup.nextWatermark(since, attempts)
+        val failures = PhotoBackup.rememberFailures(
+            PhotoBackup.decodeFailures(prefs.getString(KEY_LAST_FAILURES, null)),
+            attempts,
+        )
         val edit = prefs.edit()
         if (next != since) edit.putLong(KEY_LAST_TS, next)
         if (PhotoBackup.shouldRecordLastSuccess(attempts)) {
             edit.putLong(KEY_LAST_SUCCESS_AT, System.currentTimeMillis())
         }
+        edit.putString(KEY_LAST_FAILURES, PhotoBackup.encodeFailures(failures))
         edit.apply()
         Result.success()
     }

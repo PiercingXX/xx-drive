@@ -1,10 +1,15 @@
 package com.piercingxx.xxdrive
 
 import android.Manifest
+import android.content.Context
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
 import android.os.Build
 import android.os.Bundle
+import android.view.View
 import android.webkit.CookieManager
 import android.widget.Button
 import android.widget.CheckBox
@@ -18,6 +23,7 @@ import androidx.work.Constraints
 import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.NetworkType
 import androidx.work.PeriodicWorkRequestBuilder
+import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -45,6 +51,17 @@ class SettingsActivity : AppCompatActivity() {
     }
 
     private var loggingOut = false
+    private var backupRunning = false
+    private val connectivity by lazy {
+        getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+    }
+    private val networkCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) { runOnUiThread { bindMetered() } }
+        override fun onLost(network: Network) { runOnUiThread { bindMetered() } }
+        override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) {
+            runOnUiThread { bindMetered() }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -59,11 +76,19 @@ class SettingsActivity : AppCompatActivity() {
         val prefs = getSharedPreferences(PhotoUploadWorker.PREFS, MODE_PRIVATE)
         wifiOnly.isChecked = prefs.getBoolean("wifi_only", true)
         autoBackup.isChecked = prefs.getBoolean("auto_backup", false)
-        bindLastBackup(prefs)
+        bindBackupStatus(prefs)
+
+        WorkManager.getInstance(this)
+            .getWorkInfosByTagLiveData(PhotoUploadWorker.TAG)
+            .observe(this) { infos ->
+                backupRunning = infos.any { it.state == WorkInfo.State.RUNNING }
+                bindMetered()
+            }
 
         wifiOnly.setOnCheckedChangeListener { _, checked ->
             prefs.edit().putBoolean("wifi_only", checked).apply()
             if (autoBackup.isChecked) applyBackupSchedule(checked)
+            bindMetered()
         }
 
         autoBackup.setOnCheckedChangeListener { _, checked ->
@@ -75,6 +100,7 @@ class SettingsActivity : AppCompatActivity() {
             }
             prefs.edit().putBoolean("auto_backup", checked).apply()
             applyBackupSchedule(wifiOnly.isChecked)
+            bindMetered()
         }
 
         logout.setOnClickListener {
@@ -128,16 +154,33 @@ class SettingsActivity : AppCompatActivity() {
             applyBackupSchedule(
                 findViewById<CheckBox>(R.id.wifiOnlyCheck).isChecked,
             )
+            bindMetered()
         } else {
             // Keep the box off; explain why nothing was scheduled.
             Toast.makeText(this, R.string.backup_permission_denied, Toast.LENGTH_LONG).show()
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        connectivity.registerDefaultNetworkCallback(networkCallback)
+    }
+
+    override fun onStop() {
+        connectivity.unregisterNetworkCallback(networkCallback)
+        super.onStop()
+    }
+
     override fun onResume() {
         super.onResume()
         ThemeChrome.apply(this)
-        bindLastBackup(getSharedPreferences(PhotoUploadWorker.PREFS, MODE_PRIVATE))
+        bindBackupStatus(getSharedPreferences(PhotoUploadWorker.PREFS, MODE_PRIVATE))
+    }
+
+    private fun bindBackupStatus(prefs: SharedPreferences) {
+        bindLastBackup(prefs)
+        bindFailures(prefs)
+        bindMetered()
     }
 
     private fun bindLastBackup(prefs: SharedPreferences) {
@@ -151,6 +194,54 @@ class SettingsActivity : AppCompatActivity() {
                 DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(at)),
             )
         }
+    }
+
+    private fun bindFailures(prefs: SharedPreferences) {
+        val view = findViewById<TextView>(R.id.backupErrorsText)
+        val failures = PhotoBackup.decodeFailures(prefs.getString(PhotoUploadWorker.KEY_LAST_FAILURES, null))
+        if (failures.isEmpty()) {
+            view.visibility = View.GONE
+            view.text = ""
+            return
+        }
+        val lines = failures.joinToString("\n") { f ->
+            val label = f.name.ifBlank { f.uri }
+            getString(R.string.backup_failure_line, label, f.message)
+        }
+        view.text = getString(R.string.backup_failures_header) + "\n" + lines
+        view.visibility = View.VISIBLE
+    }
+
+    private fun bindMetered() {
+        if (isDestroyed) return
+        val view = findViewById<TextView>(R.id.backupMeteredText) ?: return
+        val prefs = getSharedPreferences(PhotoUploadWorker.PREFS, MODE_PRIVATE)
+        val hint = PhotoBackup.meteredHint(
+            backupEnabled = prefs.getBoolean("auto_backup", false),
+            running = backupRunning,
+            wifiOnly = prefs.getBoolean("wifi_only", true),
+            connected = networkConnected(),
+            metered = connectivity.isActiveNetworkMetered,
+        )
+        when (hint) {
+            PhotoBackup.MeteredHint.HIDDEN -> {
+                view.visibility = View.GONE
+                view.text = ""
+            }
+            PhotoBackup.MeteredHint.METERED_IN_FLIGHT -> {
+                view.visibility = View.VISIBLE
+                view.text = getString(R.string.backup_metered_in_flight)
+            }
+            PhotoBackup.MeteredHint.WAITING_UNMETERED -> {
+                view.visibility = View.VISIBLE
+                view.text = getString(R.string.backup_waiting_unmetered)
+            }
+        }
+    }
+
+    private fun networkConnected(): Boolean {
+        val caps = connectivity.getNetworkCapabilities(connectivity.activeNetwork) ?: return false
+        return caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
     }
 
     private fun applyBackupSchedule(wifiOnly: Boolean) {

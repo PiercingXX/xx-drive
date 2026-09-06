@@ -10,7 +10,9 @@ WebView + native upload/download/camera backup.
 
 ```
 Status: go test ./... green. Android unit tests exist. Zero phone
-confirmation. WebView PWA stays server-dark.
+confirmation. Settings shows last-success, last-10 photo failures, and
+metered / waiting-for-unmetered. WebView/PWA file list stays
+server-dark; native chrome follows launcher.
 ```
 
 ---
@@ -92,19 +94,18 @@ irreplaceable files behind this node until this list is green.
 
 ---
 
-## Theme (decide by doing)
+## Theme (locked)
 
-- [ ] WebView file list either follows launcher presets **or** this file
-  permanently says “PWA stays server-dark.” Pick one after the first
-  smoke, do not leave it as a ghost P1.
+**WebView/PWA file list stays server-dark; native chrome follows launcher.**
+No CSS/PWA bridge. Login, settings, and window bars take XX-Launcher
+presets; the file list is the server's own dark web UI.
 
 ---
 
 ## Do not start (out of v1)
 
 Block/delta sync, ACLs, thumbnails, quotas, WebDAV, smart-sync
-placeholders, Play listing, ad-hoc ProGuard, LICENSE file, backup-status
-UI (P2).
+placeholders, Play listing, ad-hoc ProGuard, LICENSE file.
 
 ---
 

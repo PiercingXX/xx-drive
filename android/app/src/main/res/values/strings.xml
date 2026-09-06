@@ -15,6 +15,10 @@
     <string name="backup_permission_denied">Photo access denied — camera backup stays off</string>
     <string name="backup_never">Last backup: never</string>
     <string name="backup_last">Last backup: %1$s</string>
+    <string name="backup_metered_in_flight">Uploading on a metered connection</string>
+    <string name="backup_waiting_unmetered">Waiting for unmetered</string>
+    <string name="backup_failures_header">Recent failures:</string>
+    <string name="backup_failure_line">%1$s — %2$s</string>
     <string name="err_all_fields">Please fill in all fields</string>
     <string name="err_generic">Something went wrong</string>
     <string name="err_login_failed">Login failed (HTTP %1$d)</string>
