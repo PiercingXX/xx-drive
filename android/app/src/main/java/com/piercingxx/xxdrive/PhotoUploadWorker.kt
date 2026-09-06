@@ -28,8 +28,9 @@ class PhotoUploadWorker(appContext: Context, params: WorkerParameters) :
 
     companion object {
         const val TAG = "camera-backup"
-        private const val PREFS = "xxdrive_settings"
-        private const val KEY_LAST_TS = "last_photo_ts"
+        const val PREFS = "xxdrive_settings"
+        const val KEY_LAST_TS = "last_photo_ts"
+        const val KEY_LAST_SUCCESS_AT = "last_backup_success_at"
     }
 
     private val http = OkHttpClient()
@@ -43,7 +44,10 @@ class PhotoUploadWorker(appContext: Context, params: WorkerParameters) :
         val since = prefs.getLong(KEY_LAST_TS, System.currentTimeMillis() - 24 * 3600_000L)
 
         val images = queryNewImages(since)
-        if (images.isEmpty()) return@withContext Result.success()
+        if (images.isEmpty()) {
+            prefs.edit().putLong(KEY_LAST_SUCCESS_AT, System.currentTimeMillis()).apply()
+            return@withContext Result.success()
+        }
 
         val attempts = mutableListOf<PhotoBackup.Attempt>()
         val dayFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US)
@@ -62,9 +66,12 @@ class PhotoUploadWorker(appContext: Context, params: WorkerParameters) :
             }
         }
         val next = PhotoBackup.nextWatermark(since, attempts)
-        if (next != since) {
-            prefs.edit().putLong(KEY_LAST_TS, next).apply()
+        val edit = prefs.edit()
+        if (next != since) edit.putLong(KEY_LAST_TS, next)
+        if (PhotoBackup.shouldRecordLastSuccess(attempts)) {
+            edit.putLong(KEY_LAST_SUCCESS_AT, System.currentTimeMillis())
         }
+        edit.apply()
         Result.success()
     }
 
@@ -72,30 +79,49 @@ class PhotoUploadWorker(appContext: Context, params: WorkerParameters) :
 
     private fun queryNewImages(since: Long): List<ImageItem> {
         val out = mutableListOf<ImageItem>()
+        val added = MediaStore.Images.Media.DATE_ADDED
+        val modified = MediaStore.Images.Media.DATE_MODIFIED
+        val taken = MediaStore.Images.Media.DATE_TAKEN
         val proj = arrayOf(
             MediaStore.Images.Media._ID,
             MediaStore.Images.Media.DISPLAY_NAME,
-            MediaStore.Images.Media.DATE_ADDED,
+            added,
+            modified,
+            taken,
         )
+        // DATE_ADDED / DATE_MODIFIED: seconds. DATE_TAKEN: milliseconds.
+        val sinceSec = (since / 1000L).toString()
         applicationContext.contentResolver.query(
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
             proj,
-            "${MediaStore.Images.Media.DATE_ADDED} > ?",
-            arrayOf((since / 1000).toString()), // DATE_ADDED is epoch seconds; since is epoch millis
-            "${MediaStore.Images.Media.DATE_ADDED} ASC",
+            "$added > ? OR $modified > ? OR $taken > ?",
+            arrayOf(sinceSec, sinceSec, since.toString()),
+            "$added ASC",
         )?.use { cur ->
             val idCol = cur.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
             val nameCol = cur.getColumnIndexOrThrow(MediaStore.Images.Media.DISPLAY_NAME)
-            val dateCol = cur.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_ADDED)
+            val addedCol = cur.getColumnIndexOrThrow(added)
+            val modifiedCol = cur.getColumnIndexOrThrow(modified)
+            val takenCol = cur.getColumnIndexOrThrow(taken)
             while (cur.moveToNext()) {
+                val dateAddedSec = cur.getLong(addedCol)
+                val dateModifiedSec = cur.getLong(modifiedCol)
+                val dateTakenMs = cur.getLong(takenCol)
+                if (!PhotoBackup.isNewerThan(since, dateAddedSec, dateModifiedSec, dateTakenMs)) {
+                    continue
+                }
                 val uri = android.content.ContentUris.withAppendedId(
                     MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cur.getLong(idCol))
-                // DATE_ADDED is epoch seconds; keep dateTaken in millis so the
-                // watermark (KEY_LAST_TS) and Date() formatting stay consistent.
-                out.add(ImageItem(uri.toString(), cur.getString(nameCol), cur.getLong(dateCol) * 1000))
+                out.add(
+                    ImageItem(
+                        uri.toString(),
+                        cur.getString(nameCol),
+                        PhotoBackup.timestampMs(dateAddedSec, dateModifiedSec, dateTakenMs),
+                    ),
+                )
             }
         }
-        return out
+        return out.sortedBy { it.dateTaken }
     }
 
     @Throws(Exception::class)

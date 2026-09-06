@@ -90,4 +90,78 @@ class PhotoBackupTest {
             ),
         )
     }
+
+    @Test
+    fun `DATE_TAKEN zero still counts as new via DATE_ADDED`() {
+        val since = 1_700_000_000_000L
+        assertTrue(
+            PhotoBackup.isNewerThan(
+                sinceMs = since,
+                dateAddedSec = since / 1000L + 10,
+                dateModifiedSec = 0L,
+                dateTakenMs = 0L,
+            ),
+        )
+    }
+
+    @Test
+    fun `DATE_ADDED zero still counts as new via DATE_TAKEN millis`() {
+        val since = 1_700_000_000_000L
+        assertTrue(
+            PhotoBackup.isNewerThan(
+                sinceMs = since,
+                dateAddedSec = 0L,
+                dateModifiedSec = 0L,
+                dateTakenMs = since + 1,
+            ),
+        )
+    }
+
+    @Test
+    fun `DATE_MODIFIED covers OEM cameras that zero DATE_TAKEN and DATE_ADDED`() {
+        val since = 1_700_000_000_000L
+        assertTrue(
+            PhotoBackup.isNewerThan(
+                sinceMs = since,
+                dateAddedSec = 0L,
+                dateModifiedSec = since / 1000L + 5,
+                dateTakenMs = 0L,
+            ),
+        )
+    }
+
+    @Test
+    fun `older timestamps on every column are not new`() {
+        val since = 1_700_000_000_000L
+        assertTrue(
+            !PhotoBackup.isNewerThan(
+                sinceMs = since,
+                dateAddedSec = since / 1000L,
+                dateModifiedSec = since / 1000L,
+                dateTakenMs = since,
+            ),
+        )
+    }
+
+    @Test
+    fun `timestampMs ignores DATE_TAKEN zero and prefers the newest real clock`() {
+        assertEquals(5_000L, PhotoBackup.timestampMs(5, 1, 0))
+        assertEquals(9_000L, PhotoBackup.timestampMs(5, 9, 100))
+        assertEquals(12_000L, PhotoBackup.timestampMs(5, 9, 12_000L))
+    }
+
+    @Test
+    fun `last-success is recorded for empty runs and any upload, not all-failed`() {
+        assertTrue(PhotoBackup.shouldRecordLastSuccess(emptyList()))
+        assertTrue(
+            PhotoBackup.shouldRecordLastSuccess(
+                listOf(PhotoBackup.Attempt(1L, true), PhotoBackup.Attempt(2L, false)),
+            ),
+        )
+        assertTrue(
+            !PhotoBackup.shouldRecordLastSuccess(
+                listOf(PhotoBackup.Attempt(1L, false), PhotoBackup.Attempt(2L, false)),
+            ),
+        )
+    }
 }

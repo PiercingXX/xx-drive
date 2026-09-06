@@ -1,12 +1,14 @@
 package com.piercingxx.xxdrive
 
 import android.Manifest
+import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
 import android.webkit.CookieManager
 import android.widget.Button
 import android.widget.CheckBox
+import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
@@ -22,6 +24,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
+import java.text.DateFormat
+import java.util.Date
 import java.util.concurrent.TimeUnit
 
 /** Settings: logout and camera auto-backup toggle. */
@@ -52,9 +56,10 @@ class SettingsActivity : AppCompatActivity() {
         val autoBackup = findViewById<CheckBox>(R.id.autoBackupCheck)
         val logout = findViewById<Button>(R.id.logoutBtn)
 
-        val prefs = getSharedPreferences("xxdrive_settings", MODE_PRIVATE)
+        val prefs = getSharedPreferences(PhotoUploadWorker.PREFS, MODE_PRIVATE)
         wifiOnly.isChecked = prefs.getBoolean("wifi_only", true)
         autoBackup.isChecked = prefs.getBoolean("auto_backup", false)
+        bindLastBackup(prefs)
 
         wifiOnly.setOnCheckedChangeListener { _, checked ->
             prefs.edit().putBoolean("wifi_only", checked).apply()
@@ -113,7 +118,7 @@ class SettingsActivity : AppCompatActivity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode != REQ_MEDIA_PERMISSION) return
         val autoBackup = findViewById<CheckBox>(R.id.autoBackupCheck)
-        val prefs = getSharedPreferences("xxdrive_settings", MODE_PRIVATE)
+        val prefs = getSharedPreferences(PhotoUploadWorker.PREFS, MODE_PRIVATE)
         if (grantResults.isNotEmpty() &&
             grantResults[0] == PackageManager.PERMISSION_GRANTED
         ) {
@@ -132,11 +137,25 @@ class SettingsActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         ThemeChrome.apply(this)
+        bindLastBackup(getSharedPreferences(PhotoUploadWorker.PREFS, MODE_PRIVATE))
+    }
+
+    private fun bindLastBackup(prefs: SharedPreferences) {
+        val view = findViewById<TextView>(R.id.lastBackupText)
+        val at = prefs.getLong(PhotoUploadWorker.KEY_LAST_SUCCESS_AT, 0L)
+        view.text = if (at <= 0L) {
+            getString(R.string.backup_never)
+        } else {
+            getString(
+                R.string.backup_last,
+                DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT).format(Date(at)),
+            )
+        }
     }
 
     private fun applyBackupSchedule(wifiOnly: Boolean) {
         val wm = WorkManager.getInstance(this)
-        if (!getSharedPreferences("xxdrive_settings", MODE_PRIVATE).getBoolean("auto_backup", false)) {
+        if (!getSharedPreferences(PhotoUploadWorker.PREFS, MODE_PRIVATE).getBoolean("auto_backup", false)) {
             wm.cancelAllWorkByTag(PhotoUploadWorker.TAG)
             Toast.makeText(this, R.string.backup_off, Toast.LENGTH_SHORT).show()
             return

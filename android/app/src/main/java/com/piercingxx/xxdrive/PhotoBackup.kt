@@ -7,6 +7,42 @@ object PhotoBackup {
     data class Attempt(val dateTaken: Long, val uploaded: Boolean)
 
     /**
+     * Whether a MediaStore row is newer than [sinceMs].
+     *
+     * DATE_ADDED and DATE_MODIFIED are epoch **seconds**; DATE_TAKEN is epoch
+     * **milliseconds** (0 means the OEM left it unset — Graphene/Pixel is
+     * fine, some OEM cameras write 0 forever). Any one of the three beating
+     * the watermark is enough, so DATE_TAKEN=0 still backs up via DATE_ADDED
+     * or DATE_MODIFIED.
+     */
+    fun isNewerThan(
+        sinceMs: Long,
+        dateAddedSec: Long,
+        dateModifiedSec: Long,
+        dateTakenMs: Long,
+    ): Boolean {
+        val sinceSec = sinceMs / 1000L
+        return dateAddedSec > sinceSec ||
+            dateModifiedSec > sinceSec ||
+            dateTakenMs > sinceMs
+    }
+
+    /**
+     * Best epoch-millis timestamp for watermark and `Camera Uploads/<date>/`.
+     * DATE_TAKEN=0 is treated as unset, not as 1970.
+     */
+    fun timestampMs(dateAddedSec: Long, dateModifiedSec: Long, dateTakenMs: Long): Long {
+        val taken = if (dateTakenMs > 0L) dateTakenMs else 0L
+        val added = if (dateAddedSec > 0L) dateAddedSec * 1000L else 0L
+        val modified = if (dateModifiedSec > 0L) dateModifiedSec * 1000L else 0L
+        return maxOf(taken, added, modified)
+    }
+
+    /** Record a last-success wall clock when the run was empty or uploaded at least one. */
+    fun shouldRecordLastSuccess(attempts: List<Attempt>): Boolean =
+        attempts.isEmpty() || attempts.any { it.uploaded }
+
+    /**
      * The next watermark is the dateTaken at the end of the longest ALL-successful
      * PREFIX of the batch (attempts sorted ascending by dateTaken): advancing past
      * a failed photo would permanently skip it, so the watermark stops at the first
