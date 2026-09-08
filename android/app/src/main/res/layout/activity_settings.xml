@@ -33,5 +33,9 @@
         <Button android:id="@+id/logoutBtn"
             android:layout_width="match_parent" android:layout_height="wrap_content"
             android:text="@string/logout" android:layout_marginTop="32dp" />
+
+        <Button android:id="@+id/logsBtn"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:text="Logs" android:layout_marginTop="16dp" />
     </LinearLayout>
 </ScrollView>

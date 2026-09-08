@@ -1,6 +1,7 @@
 package com.piercingxx.xxdrive
 
 import android.app.Application
+import com.piercingxx.xxdrive.log.AppLog
 
 /**
  * Process-wide entry point. WorkManager can run [PhotoUploadWorker] with no
@@ -10,6 +11,9 @@ import android.app.Application
 class XxDriveApp : Application() {
     override fun onCreate() {
         super.onCreate()
+        AppLog.init(this)
+        AppLog.installCrashHandler()
+        AppLog.i("app", "start")
         Session.init(this)
     }
 }

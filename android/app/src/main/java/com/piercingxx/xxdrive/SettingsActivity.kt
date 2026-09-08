@@ -18,6 +18,7 @@ import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import com.piercingxx.xxdrive.log.LogsUi
 import com.piercingxx.xxdrive.theme.ThemeChrome
 import androidx.work.Constraints
 import androidx.work.ExistingPeriodicWorkPolicy
@@ -72,6 +73,7 @@ class SettingsActivity : AppCompatActivity() {
         val wifiOnly = findViewById<CheckBox>(R.id.wifiOnlyCheck)
         val autoBackup = findViewById<CheckBox>(R.id.autoBackupCheck)
         val logout = findViewById<Button>(R.id.logoutBtn)
+        findViewById<Button>(R.id.logsBtn).setOnClickListener { LogsUi.show(this) }
 
         val prefs = getSharedPreferences(PhotoUploadWorker.PREFS, MODE_PRIVATE)
         wifiOnly.isChecked = prefs.getBoolean("wifi_only", true)
