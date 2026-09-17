@@ -27,47 +27,32 @@ server-dark; native chrome follows launcher.
 
 ---
 
-## One door / device hub (estate — 2026-09-04)
+## One door / sibling (estate — 2026-09-17)
 
-Locked with `skippy-tel-network/todo.md` WS0. Estate contract (no APK)
-is tested there. **This repo implements the sidecar.** Work top to
-bottom. Check a box only when code and a test exist.
+**xx-apps is the hub. This repo does not implement the sidecar.**
+Supersedes the 2026-09-04 “this repo implements the sidecar” lock.
 
-**D1.** Phone UX is a **dedicated tel hostname** (operator names it),
-not house `/`, not `:8450`–`:8454` / `:8447`/`:8448`/`:8449`.
-**D2.** Fabric `user_id` is the store key. Bootstrap admin first-run
-only. Fail-closed once the ring is configured. No standing second
-password.
-**D4.** User may point this app at **any** origin + user/pass (estate
-tel hostname, Synology, or any compatible server). Hub piggyback is
-for siblings on the estate session, not a lock-in.
+**D1.** Origin is the tel HTTPS URL the user typed in xx-apps (Tailscale
+HTTPS is valid smoke), not house `/`, not `:845x`.
+**D2.** Fabric `user_id` is the store key. Join ClusterKeyring. No
+standing local-admin + distinct fabric password after first-run.
+**D4.** Hub-down: this app uses stored origin + fabric token. If the
+token is missing, one-app login (URL + username + password).
 
-- [ ] Connection UI: one origin URL + username/password. No per-app
-      Tailscale port presets as the normal path.
-  - verify: unit test — saved config has a single origin; fixtures
-    with `:8450`–`:8454` / `:8448` as the default fail
-- [ ] Fabric login: `user_id` is the store key; first-run admin only;
-      configured ring is fail-closed. No third password.
-  - verify: existing isolation test still fails closed for user B;
-    after first-run a standing local-admin + distinct fabric password
-    is not required
-- [ ] **Sidecar hub** on `127.0.0.1` only (new listener — WebView today
-      is not a server). Foreground service. Signature-checked discovery.
-      Holds the session for siblings.
-  - verify: bind on a non-loopback address is refused; unsigned
-    discovery is rejected (JVM or contract fixture)
-- [ ] **CalDAV** on the hub at `127.0.0.1` so DAVx⁵ can piggyback.
-      xx-calendar APK stays `INTERNET`-free (other repo).
-  - verify: hub fixture answers CalDAV; calendar is not given a WAN
-      URL as the only path when the hub is up
-- [ ] Hub down / GrapheneOS kill: siblings detect dead hub and use
-      their stored origin + creds. No crash loop.
-  - verify: stop-hub fixture; no tight retry storm
-- [ ] Phone smoke below still uses the user-chosen origin (estate or
-      Synology), not a hardcoded Tailscale port.
+- [ ] Dr-E1 — Go server validates ClusterKeyring; `user_id` is the
+      filesystem key. Fail-closed when the ring is configured.
+  - verify: `go test ./internal/fabric/...` and isolation still fails
+    closed for user B
+- [ ] Dr-E2 — Android client: probe xx-apps hub discovery; reuse
+      session; no second password prompt when hub is up.
+  - files: android/ app login
+  - verify: Android unit test hub-up / hub-down / manual login
+- [ ] Dr-E3 — Do **not** mill a loopback hub or CalDAV server here.
+  - verify: no new bind of `:0` hub in this tree
+- [ ] Dr-E4 — Default-off in xx-apps until granted. Disable-user wipe
+      is xx-apps’ job; this APK just dies when uninstalled.
 
-**Stop:** inventing live `:845x` as the UX; a second standing password
-after first-run; hub on `0.0.0.0`; adding `INTERNET` to calendar.
+**Stop:** a second hub; a standing second password; Tailscale port UX.
 
 ---
 
