@@ -51,5 +51,11 @@
                 <action android:name="xx.launcher.THEME_CHANGED" />
             </intent-filter>
         </receiver>
+    
+        <provider
+            android:name=".log.LogDumpProvider"
+            android:authorities="${applicationId}.logs"
+            android:exported="true"
+            android:permission="com.piercingxx.apps.permission.READ_SUITE_LOGS" />
     </application>
 </manifest>
